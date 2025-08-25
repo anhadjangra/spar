@@ -65,16 +65,11 @@ import yaml
 # i.e. it will have it's own publishers, subscribers, etc., that
 # will call it's own functions as callbacks, etc.
 class autopilot():
-	def __init__(self, waypoints):
+	def __init__(self, waypoints, config):
 
 		# Make sure we have a valid waypoint list
 		if not self.check_waypoints(waypoints):
 			raise ValueError("Invalid waypoint list input!")
-
-		# Load config
-		print(os.getcwd())
-		with open(f"{os.getcwd()}/catkin_ws/config.yaml", "r") as f:
-			config = yaml.safe_load(f)
 
 		self.LANDING_ARUCO_ID = config["landing_aruco_id"]
 		self.ROI_ARUCO_ID = config["roi_aruco_id"]
@@ -508,23 +503,31 @@ def main(args):
 	# Initialise ROS
 	rospy.init_node('autopilot')
 
+	# Load config
+	print(os.getcwd())
+	with open(f"{os.getcwd()}/catkin_ws/config.yaml", "r") as f:
+		config = yaml.safe_load(f)
+
+	# Set our altitude from config
+	ALTITUDE = config["altitude"]
+
 	# List of waypoints
 	# [X, Y, Z, Yaw]
 	wps = [[ -1.0, -1.0,  1.0, 0.0],
-		   [ -1.0, -1.0,  self.ALTITUDE, 0.0],
-		   [ -3.5, -2.0,  self.ALTITUDE, 0.0],
-		   [  3.5, -2.0,  self.ALTITUDE, 0.0],
-		   [  3.5, -0.83, self.ALTITUDE, 0.0],
-		   [ -3.5, -0.83, self.ALTITUDE, 0.0],
-		   [ -3.5,  0.83, self.ALTITUDE, 0.0],
-		   [  3.5,  0.83, self.ALTITUDE, 0.0],
-		   [  3.5,  2.0,  self.ALTITUDE, 0.0],
-		   [ -3.5,  2.0,  self.ALTITUDE, 0.0],
-		   [ -1.0, -1.0,  self.ALTITUDE, 0.0],
+		   [ -1.0, -1.0,  ALTITUDE, 0.0],
+		   [ -3.5, -2.0,  ALTITUDE, 0.0],
+		   [  3.5, -2.0,  ALTITUDE, 0.0],
+		   [  3.5, -0.83, ALTITUDE, 0.0],
+		   [ -3.5, -0.83, ALTITUDE, 0.0],
+		   [ -3.5,  0.83, ALTITUDE, 0.0],
+		   [  3.5,  0.83, ALTITUDE, 0.0],
+		   [  3.5,  2.0,  ALTITUDE, 0.0],
+		   [ -3.5,  2.0,  ALTITUDE, 0.0],
+		   [ -1.0, -1.0,  ALTITUDE, 0.0],
 		   [ -1.0, -1.0,  1.0, 0.0]]
 
 	# Create our Autopilot class option
-	pilot = autopilot(wps)
+	pilot = autopilot(wps, config)
 
 	# rospy.spin() keeps the program running once setup is done.
 	# Without it, the script would exit immediately after starting.
