@@ -44,6 +44,9 @@ from actionlib_msgs.msg import GoalStatus
 #   that includes time and reference frame; commonly used for robot/drone poses
 from geometry_msgs.msg import Point, PointStamped, PoseStamped
 
+# For deploying payload
+from std_msgs.msg import Bool
+
 # Import the SPAR flight motion action interface:
 # - FlightMotionAction = the *action wrapper* (bundles goal, result, and feedback types so actionlib can manage them as one action).
 # - FlightMotionGoal   = the goal message you fill in with motion parameters (type, position, yaw, speeds, convergence) and send to the action server (Spar_Node).
@@ -140,6 +143,10 @@ class autopilot():
 			# self.sub_roi = rospy.Subscriber("~roi", PointStamped, self.callback_inspect_roi)
 			self.sub_roi_marker = rospy.Subscriber(f"/marker_location/id/{self.ROI_ARUCO_ID}", PointStamped, self.callback_inspect_roi, callback_args=False)
 			self.sub_landing_marker = None
+
+			# Create a ROS publisher to send messages to the 'servo*/set' topic.
+			self.s1_pub = rospy.Publisher("/servo1/set", Bool, queue_size=10)
+			self.s2_pub = rospy.Publisher("/servo2/set", Bool, queue_size=10)
 
 			# Take off to a configured height; block until complete
 			self.send_takeoff_motion()
@@ -297,12 +304,22 @@ class autopilot():
 		rospy.loginfo("Reached diversion ROI!")
 		self.visited_rois.add(topic)
 
-		# XXX: Do something?
-
 		# Loiter above ROI
 		if self.loiter_time > 0.0:
 			rospy.loginfo("Hovering over ROI for %.1f s", self.loiter_time)
 			rospy.sleep(rospy.Duration(self.loiter_time))
+
+		# !!!: Change this to modify behaviour at ROIs
+		if not landing: # deployment roi
+			rospy.loginfo("Hovering at deployment waypoint...")
+			rospy.loginfo("Deploying payload 1...")
+			self.s1_pub.publish(Bool(True))
+			rospy.loginfo("Waiting 5 seconds...")
+			rospy.sleep(5)
+			rospy.loginfo("Deploying payload 2...")
+			self.s2_pub.publish(Bool(True))
+			rospy.loginfo("Waiting 5 seconds...")
+			rospy.sleep(5)
 
 		# Land if landing flag true
 		if landing:
