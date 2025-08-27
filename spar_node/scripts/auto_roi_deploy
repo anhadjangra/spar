@@ -251,7 +251,7 @@ class autopilot():
 		topic = hdr.get("topic")  # may be None in some contexts
 
 		if topic in self.visited_rois:
-			rospy.loginfo("already visited topic=%s", topic)
+			rospy.loginfo_throttle_identical(2, "already visited topic=%s", topic)
 			return
 
 		# Record our current location so we can return to it later
@@ -269,17 +269,17 @@ class autopilot():
 		dwp = [msg_in.point.x, msg_in.point.y, start_z, current_yaw]
 		
 		if not self.check_waypoint(dwp):
-			rospy.logwarn("Bad ROI waypoint, outside of safe flight zone!\nCancelling diversion...")
+			rospy.logwarn_throttle_identical(2, "Bad ROI waypoint, outside of safe flight zone!\nCancelling diversion...")
 			return
 
 		# If we’re already diverting, ignore further ROI requests
 		if self.performing_roi:
-			rospy.logwarn("ROI request ignored: diversion already in progress.")
+			rospy.logwarn_throttle_identical(2, "ROI request ignored: diversion already in progress.")
 			return
 
 		# We need a current pose to be able to return safely
 		if not self.have_pose:
-			rospy.logwarn("No current pose yet; cannot divert to ROI.")
+			rospy.logwarn_throttle_identical(2, "No current pose yet; cannot divert to ROI.")
 			return
 
 		# Set our flag that we are performing the diversion and cancel active goal
@@ -502,7 +502,7 @@ class autopilot():
 					# Else the mission is over, shutdown and quit the node
 					# XXX:	This could be used to restart the mission back to the
 					#		first waypoint instead to restart the mission
-					rospy.loginfo("Mission complete! Landing...")
+					rospy.loginfo_throttle_identical(5, "Mission complete! Landing...")
 					self.sub_landing_marker = rospy.Subscriber(f"/marker_locations/id/{self.LANDING_ARUCO_ID}", PointStamped, self.callback_inspect_roi, callback_args=True)
 					# self.send_land_motion()
 					# rospy.signal_shutdown("complete")
