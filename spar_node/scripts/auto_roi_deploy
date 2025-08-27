@@ -209,11 +209,11 @@ class autopilot():
 		if x > 4.0 or x < -4.0:
 			rospy.logwarn("Waypoint x=%.2f outside [-4, 4]" % x)
 			return False
-		if y > 4.0 or y < -4.0:
-			rospy.logwarn("Waypoint y=%.2f outside [-4, 4]" % y)
+		if y > 2.5 or y < -2.5:
+			rospy.logwarn("Waypoint y=%.2f outside [-2.5, 2.5]" % y)
 			return False
-		if z > 4.0 or z < 0.0:
-			rospy.logwarn("Waypoint z=%.2f outside [0, 4]" % z)
+		if z > 4.0 or z < 0.5:
+			rospy.logwarn("Waypoint z=%.2f outside [0, 0.5]" % z)
 			return False
 
 		# If we haven't returned false yet, then waypoint looks valid!
@@ -334,6 +334,7 @@ class autopilot():
 				self.performing_roi = False
 				return
 
+		rospy.loginfo("Returning to pre-diversion position...")
 		self.send_wp(rwp)
 		self.spar_client.wait_for_result()
 		if self.spar_client.get_state() != GoalStatus.SUCCEEDED:
@@ -531,14 +532,14 @@ def main(args):
 	# List of waypoints
 	# [X, Y, Z, Yaw]
 	wps = [[ -1.0, -1.0,  ALTITUDE, 0.0],
-		   [ -3.5, -2.0,  ALTITUDE, 0.0],
-		   [  3.5, -2.0,  ALTITUDE, 0.0],
-		   [  3.5, -0.83, ALTITUDE, 0.0],
-		   [ -3.5, -0.83, ALTITUDE, 0.0],
-		   [ -3.5,  0.83, ALTITUDE, 0.0],
-		   [  3.5,  0.83, ALTITUDE, 0.0],
-		   [  3.5,  2.0,  ALTITUDE, 0.0],
-		   [ -3.5,  2.0,  ALTITUDE, 0.0]]
+		   [ -3.8, -2.3,  ALTITUDE, 0.0],
+		   [  3.8, -2.3,  ALTITUDE, 0.0],
+		   [  3.8, -0.83, ALTITUDE, 0.0],
+		   [ -3.8, -0.83, ALTITUDE, 0.0],
+		   [ -3.8,  0.83, ALTITUDE, 0.0],
+		   [  3.8,  0.83, ALTITUDE, 0.0],
+		   [  3.8,  2.3,  ALTITUDE, 0.0],
+		   [ -3.8,  2.3,  ALTITUDE, 0.0]]
 
 	# Create our Autopilot class option
 	pilot = autopilot(wps, config)
