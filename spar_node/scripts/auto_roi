@@ -138,7 +138,7 @@ class autopilot():
 
 			# Subscriber to catch "ROI" diversion commands
 			# self.sub_roi = rospy.Subscriber("~roi", PointStamped, self.callback_inspect_roi)
-			self.sub_roi_marker = rospy.Subscriber(f"/marker_location/id/{self.ROI_ARUCO_ID}", PointStamped, self.callback_inspect_roi, callback_args=False)
+			self.sub_roi_marker = rospy.Subscriber(f"/marker_locations/id/{self.ROI_ARUCO_ID}", PointStamped, self.callback_inspect_roi, callback_args=False)
 			self.sub_landing_marker = None
 
 			# Take off to a configured height; block until complete
@@ -486,7 +486,7 @@ class autopilot():
 					# XXX:	This could be used to restart the mission back to the
 					#		first waypoint instead to restart the mission
 					rospy.loginfo("Mission complete! Landing...")
-					self.sub_landing_marker = rospy.Subscriber(f"/marker_location/id/{self.LANDING_ARUCO_ID}", PointStamped, self.callback_inspect_roi, callback_args=True)
+					self.sub_landing_marker = rospy.Subscriber(f"/marker_locations/id/{self.LANDING_ARUCO_ID}", PointStamped, self.callback_inspect_roi, callback_args=True)
 					# self.send_land_motion()
 					# rospy.signal_shutdown("complete")
 			elif (self.spar_client.get_state() == GoalStatus.PREEMPTED) or (self.spar_client.get_state() == GoalStatus.ABORTED) or (self.spar_client.get_state() == GoalStatus.REJECTED):
@@ -521,9 +521,7 @@ def main(args):
 		   [ -3.5,  0.83, ALTITUDE, 0.0],
 		   [  3.5,  0.83, ALTITUDE, 0.0],
 		   [  3.5,  2.0,  ALTITUDE, 0.0],
-		   [ -3.5,  2.0,  ALTITUDE, 0.0],
-		   [ -1.0, -1.0,  ALTITUDE, 0.0],
-		   [ -1.0, -1.0,  1.0, 0.0]]
+		   [ -3.5,  2.0,  ALTITUDE, 0.0]]
 
 	# Create our Autopilot class option
 	pilot = autopilot(wps, config)
