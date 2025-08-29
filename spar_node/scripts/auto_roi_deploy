@@ -206,11 +206,11 @@ class autopilot():
 			return False
 		# Make sure waypoint is within mission zone
 		x, y, z, yaw = wp
-		if x > 4.0 or x < -4.0:
-			rospy.logwarn("Waypoint x=%.2f outside [-4, 4]" % x)
+		if x > 3.8 or x < -3.8:
+			rospy.logwarn("Waypoint x=%.2f outside [-3.8, 3.8]" % x)
 			return False
-		if y > 2.5 or y < -2.5:
-			rospy.logwarn("Waypoint y=%.2f outside [-2.5, 2.5]" % y)
+		if y > 2.0 or y < -2.5:
+			rospy.logwarn("Waypoint y=%.2f outside [-2.5, 2.0]" % y)
 			return False
 		if z > 4.0 or z < 0.5:
 			rospy.logwarn("Waypoint z=%.2f outside [0, 0.5]" % z)
@@ -532,14 +532,14 @@ def main(args):
 	# List of waypoints
 	# [X, Y, Z, Yaw]
 	wps = [[ -1.0, -1.0,  ALTITUDE, 0.0],
-		   [ -3.8, -2.3,  ALTITUDE, 0.0],
-		   [  3.8, -2.3,  ALTITUDE, 0.0],
-		   [  3.8, -0.83, ALTITUDE, 0.0],
-		   [ -3.8, -0.83, ALTITUDE, 0.0],
-		   [ -3.8,  0.83, ALTITUDE, 0.0],
-		   [  3.8,  0.83, ALTITUDE, 0.0],
-		   [  3.8,  2.3,  ALTITUDE, 0.0],
-		   [ -3.8,  2.3,  ALTITUDE, 0.0]]
+		   [ -3.7, -2.3,  ALTITUDE, 0.0],
+		   [  3.7, -2.3,  ALTITUDE, 0.0],
+		   [  3.7, -0.83, ALTITUDE, 0.0],
+		   [ -3.7, -0.83, ALTITUDE, 0.0],
+		   [ -3.7,  0.83, ALTITUDE, 0.0],
+		   [  3.7,  0.83, ALTITUDE, 0.0],
+		   [  3.7,  2.3,  ALTITUDE, 0.0],
+		   [ -3.7,  2.3,  ALTITUDE, 0.0]]
 
 	# Create our Autopilot class option
 	pilot = autopilot(wps, config)
