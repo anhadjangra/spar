@@ -58,6 +58,13 @@ from std_msgs.msg import Float32
 from tf.transformations import euler_from_quaternion
 # So we can compute Yaw from quaternion
 
+# A* Path Planning
+from breadcrumb.srv import RequestPath
+from breadcrumb.srv import RequestPathRequest
+from nav_msgs.msg import Path
+from nav_msgs.msg import OccupancyGrid
+
+
 import yaml
 #----------------------------------------------------------------------------------------------------------------------------------------------------------------
 
@@ -69,6 +76,10 @@ import yaml
 # will call it's own functions as callbacks, etc.
 class autopilot():
 	def __init__(self, waypoints, config):
+		# --- Mission bounds
+		self.X_MIN, self.X_MAX = -3.8,  3.8
+		self.Y_MIN, self.Y_MAX = -2.5,  2.0
+		self.Z_MIN, self.Z_MAX =  0.5,  4.0
 
 		# Make sure we have a valid waypoint list
 		if not self.check_waypoints(waypoints):
@@ -91,6 +102,20 @@ class autopilot():
 
 		# Save the input waypoints
 		self.waypoints = waypoints
+
+		# Display the full path
+		self.display_path(waypoints,"/nav/fullPath")
+
+		# Wait to connect with Breadcrumb
+		# Code will error if you try to connect to a service
+		# that does not exist
+		rospy.wait_for_service('/breadcrumb/request_path')
+		self.srvc_bc = rospy.ServiceProxy('/breadcrumb/request_path', RequestPath)
+
+		# Initialisation breadcrumb waypoints
+		self.breadcrumbWPSnextIndex = 0
+		self.breadcrumbMode = False
+		self.breadcrumbWPS = []
 
 		# Make some space to record down our current location
 		self.current_location = Point()
@@ -139,6 +164,13 @@ class autopilot():
 			self.sub_pose = rospy.Subscriber("/mavros/local_position/pose",
 								 PoseStamped,
 								 self.callback_pose)
+
+			# --- Occupancy Grid (for snapping waypoints out of obstacles)
+			self.grid = None
+			self.grid_thresh = rospy.get_param("~obstacle_threshold",
+											rospy.get_param("/breadcrumb/obstacle_threshold", 50))
+			self.grid_inflation = rospy.get_param("~snap_inflation_margin", 0.0)  # meters; optional
+			self.sub_grid = rospy.Subscriber("/grid", OccupancyGrid, self._cb_grid, queue_size=1)
 
 			# Subscriber to catch "ROI" diversion commands
 			# self.sub_roi = rospy.Subscriber("~roi", PointStamped, self.callback_inspect_roi)
@@ -208,13 +240,13 @@ class autopilot():
 			return False
 		# Make sure waypoint is within mission zone
 		x, y, z, yaw = wp
-		if x > 3.8 or x < -3.8:
+		if x > self.X_MAX or x < self.X_MIN:
 			rospy.logwarn("Waypoint x=%.2f outside [-3.8, 3.8]" % x)
 			return False
-		if y > 2.0 or y < -2.5:
+		if y > self.Y_MAX or y < self.Y_MIN:
 			rospy.logwarn("Waypoint y=%.2f outside [-2.5, 2.0]" % y)
 			return False
-		if z > 4.0 or z < 0.5:
+		if z > self.Z_MAX or z < self.Z_MIN:
 			rospy.logwarn("Waypoint z=%.2f outside [0, 0.5]" % z)
 			return False
 
@@ -260,7 +292,6 @@ class autopilot():
 		start_x = float(self.current_location.x)
 		start_y = float(self.current_location.y)
 		start_z = float(self.current_location.z)
-
 		# XXX:	It would also be a good idea to capture "current yaw" from
 		#		the pose to maintain that throughout a diversion
 
@@ -269,7 +300,12 @@ class autopilot():
 		# Set the "diversion waypoint" (at yaw zero)
 		# editing from msg_in.pose.position.z to start_z
 		# descend to 0.8 for payload deployment
-		dwp = [msg_in.point.x, msg_in.point.y, 0.8, current_yaw]
+
+		raw_dwp = [msg_in.point.x, msg_in.point.y, 0.8, current_yaw]
+		dwp = self.snap_wp_in_mission(raw_dwp)
+		if dwp[0] != raw_dwp[0] or dwp[1] != raw_dwp[1]:
+			rospy.logwarn("ROI target snapped (%.2f, %.2f) -> (%.2f, %.2f)",
+						raw_dwp[0], raw_dwp[1], dwp[0], dwp[1])
 
 		if not self.check_waypoint(dwp):
 			rospy.logwarn_throttle_identical(2, "Bad ROI waypoint, outside of safe flight zone!\nCancelling diversion...")
@@ -505,15 +541,72 @@ class autopilot():
 				#		 an "elif" check instead.
 				#		 i.e. if complete; elif more wps; else wps finished)
 				if self.waypoint_counter < (len(self.waypoints)):
-					self.send_wp(self.waypoints[self.waypoint_counter])
 
-					# Calculate fraction of mission complete (waypoints done / total)
-					progress = float(self.waypoint_counter) / float(len(self.waypoints))
-					self.pub_progress.publish(progress)
-					rospy.loginfo("Mission progress: %.0f%%" % (progress * 100.0))
+					if not self.breadcrumbMode:
 
-					# Increment our waypoint counter
-					self.waypoint_counter += 1
+						sx, sy, sz = self.waypoints[self.waypoint_counter - 1][0:3]
+						ex, ey, ez = self.waypoints[self.waypoint_counter][0:3]
+
+						# Snap both endpoints; keep original z (already in mission plan), clamped by helper.
+						s_start = self.snap_wp_in_mission([sx, sy, sz, 0.0])
+						s_end   = self.snap_wp_in_mission([ex, ey, ez, 0.0])
+
+						if (s_start[0], s_start[1]) != (sx, sy):
+							rospy.logwarn("Segment start snapped (%.2f, %.2f) -> (%.2f, %.2f)", sx, sy, s_start[0], s_start[1])
+						if (s_end[0], s_end[1]) != (ex, ey):
+							rospy.logwarn("Segment end snapped (%.2f, %.2f) -> (%.2f, %.2f)", ex, ey, s_end[0], s_end[1])
+
+						req = RequestPathRequest()
+						req.start.x, req.start.y, req.start.z = s_start[0], s_start[1], s_start[2]
+						req.end.x,   req.end.y,   req.end.z   = s_end[0],   s_end[1],   s_end[2]
+						
+						res = self.srvc_bc(req)
+						
+						# Breadcrumb will return a vector of poses if a solution was found
+						# If no solution was found (i.e. no solution, or request bad # start/end), then breadcrumb returns and empty vector
+						# # XXX: You could also use res.path_sparse (see breadcrumb docs)
+						breadcrumbWPS = []
+						
+						if len(res.path.poses) > 0:
+							# Print the path to the screen
+							rospy.loginfo("Segment {} to {}:".format(self.waypoint_counter - 1,self.waypoint_counter))
+							rospy.loginfo("[%0.2f;%0.2f;%0.2f] => [%0.2f;%0.2f;%0.2f]", req.start.x,req.start.y,req.start.z, req.end.x,req.end.y,req.end.z)
+							
+							# Loop through the solution returned from breadcrumb
+							for i in range(len(res.path.poses)):
+								rospy.loginfo(" [%0.2f;%0.2f;%0.2f]", res.path.poses[i].position.x, res.path.poses[i].position.y, res.path.poses[i].position.z)
+								breadcrumbWPS.append([res.path.poses[i].position.x, res.path.poses[i].position.y, res.path.poses[i].position.z, 0.0])
+								
+							# Display the path
+							# print(breadcrumbWPS)
+							self.breadcrumbWPS = breadcrumbWPS
+							self.display_path(breadcrumbWPS,"/nav/pathBreadcrumb")
+							self.breadcrumbMode = True
+							self.breadcrumbWPSnextIndex = 0
+							self.send_wp(self.breadcrumbWPS[self.breadcrumbWPSnextIndex])
+							self.breadcrumbWPSnextIndex +=1
+						else:
+							rospy.logerr_throttle_identical(5, "breadcrumb solution not found, falling back to original path")
+							self.send_wp(self.waypoints[self.waypoint_counter])
+							self.waypoint_counter += 1
+
+					else:
+						if self.breadcrumbWPSnextIndex < (len(self.breadcrumbWPS)):
+							# We got here a breadcrumb path, we should exuted down here:
+							self.send_wp(self.breadcrumbWPS[self.breadcrumbWPSnextIndex])
+							
+							# Increment our waypoint counte
+							self.breadcrumbWPSnextIndex +=1
+						else:
+							# Calculate fraction of mission complete (waypoints done / total)
+							progress = float(self.waypoint_counter) / float(len(self.waypoints))
+							self.pub_progress.publish(progress)
+							rospy.loginfo("Mission progress: %.0f%%" % (progress * 100.0))
+							
+							# If we finish with the breadcrumb waypoints we increase normal waypoints
+							self.waypoint_counter += 1
+							self.breadcrumbMode = False
+
 				else:
 					# Else the mission is over, shutdown and quit the node
 					# XXX:	This could be used to restart the mission back to the
@@ -541,6 +634,124 @@ class autopilot():
 			elif (self.spar_client.get_state() == GoalStatus.PREEMPTED) or (self.spar_client.get_state() == GoalStatus.ABORTED) or (self.spar_client.get_state() == GoalStatus.REJECTED):
 				rospy.loginfo("Mission cancelled!")
 				rospy.signal_shutdown("cancelled")
+	def _clamp(self, v, vmin, vmax):
+		return max(vmin, min(v, vmax))
+
+	def _in_xy_bounds(self, x, y):
+		return (self.X_MIN <= x <= self.X_MAX) and (self.Y_MIN <= y <= self.Y_MAX)
+
+	def _cb_grid(self, msg):
+		self.grid = msg
+
+	def _world_to_cell(self, x, y):
+		if self.grid is None:
+			return None
+		res = self.grid.info.resolution
+		org = self.grid.info.origin.position
+		ix = int((x - org.x) / res)
+		iy = int((y - org.y) / res)
+		if ix < 0 or iy < 0 or ix >= self.grid.info.width or iy >= self.grid.info.height:
+			return None
+		return ix, iy
+
+	def _cell_value(self, ix, iy):
+		if self.grid is None: 
+			return 100
+		idx = iy * self.grid.info.width + ix
+		data = self.grid.data
+		if idx < 0 or idx >= len(data):
+			return 100
+		v = data[idx]
+		return 100 if v < 0 else v
+
+	def _is_free(self, x, y):
+		if not self._in_xy_bounds(x, y):
+			return False
+		c = self._world_to_cell(x, y)
+		if c is None:
+			return False
+		ix, iy = c
+		return self._cell_value(ix, iy) < self.grid_thresh
+
+	def _snap_to_free_bounded(self, x, y, max_radius=1.5, angular_samples=24):
+		"""
+		Snap (x,y) to nearest free cell respecting mission bounds.
+		If already free, returns unchanged. If no free cell found within radius,
+		returns (x,y) clamped to mission box (still may be occupied).
+		"""
+		# First clamp to mission bounds so we don't search outside
+		x = self._clamp(x, self.X_MIN, self.X_MAX)
+		y = self._clamp(y, self.Y_MIN, self.Y_MAX)
+
+		if self._is_free(x, y):
+			return x, y
+
+		if self.grid is None:
+			# No grid yet – at least return bounded coords
+			return x, y
+
+		res = self.grid.info.resolution
+		r = res
+		while r <= max_radius:
+			for k in range(angular_samples):
+				th = (2.0 * pi * k) / float(angular_samples)
+				xt = self._clamp(x + r * cos(th), self.X_MIN, self.X_MAX)
+				yt = self._clamp(y + r * sin(th), self.Y_MIN, self.Y_MAX)
+				if self._is_free(xt, yt):
+					return xt, yt
+			r += res
+
+		# Nothing found: fall back to bounded original
+		return x, y
+
+	def snap_wp_in_mission(self, wp, max_radius=1.5):
+		"""
+		Given [x,y,z,yaw], snap x,y out of obstacles & clamp z so the result
+		*passes check_waypoint()*.
+		"""
+		x, y, z, yaw = wp
+		# snap x,y to free within bounds
+		sx, sy = self._snap_to_free_bounded(x, y, max_radius=max_radius)
+
+		# clamp z strictly to mission vertical bounds
+		sz = self._clamp(z, self.Z_MIN, self.Z_MAX)
+
+		snapped = [sx, sy, sz, yaw]
+
+		# As a safety net: if something still fails (e.g., grid unknown),
+		# try shrinking the radius a bit to find any valid point.
+		if not self.check_waypoint(snapped):
+			rr = max_radius
+			while rr > 0.0:
+				sx, sy = self._snap_to_free_bounded(x, y, max_radius=rr)
+				snapped = [sx, sy, sz, yaw]
+				if self.check_waypoint(snapped):
+					break
+				rr -= 0.25
+		return snapped
+
+	# Display a path
+	def display_path(self, wps, name):
+		rospy.loginfo("Displaying path...")
+		pub_path = rospy.Publisher(name, Path, queue_size=10, latch=True)
+		msg = Path()
+		msg.header.frame_id = "/map"
+		msg.header.stamp = rospy.Time.now()
+	
+		for wp in wps:
+			pose = PoseStamped()
+			pose.pose.position.x = wp[0]
+			pose.pose.position.y = wp[1]
+			pose.pose.position.z = wp[2]
+	
+			pose.pose.orientation.w = 1.0
+			pose.pose.orientation.x = 0.0
+			pose.pose.orientation.y = 0.0
+			pose.pose.orientation.z = 0.0
+	
+			msg.poses.append(pose)
+		rospy.loginfo("Publishing path...")
+		pub_path.publish(msg)
 
 	def _quat_to_yaw(self, q):
 		"""Return yaw (rad) from geometry_msgs/Quaternion."""
