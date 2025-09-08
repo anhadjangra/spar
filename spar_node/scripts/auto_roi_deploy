@@ -75,7 +75,6 @@ class autopilot():
 			raise ValueError("Invalid waypoint list input!")
 
 		self.LANDING_ARUCO_ID = config["landing_aruco_id"]
-		self.ROI_ARUCO_ID = config["roi_aruco_id"]
 		self.ALTITUDE = config["altitude"]
 
 		# Initialises variable, later modified with callback_pose
@@ -141,12 +140,13 @@ class autopilot():
 
 			# Subscriber to catch "ROI" diversion commands
 			# self.sub_roi = rospy.Subscriber("~roi", PointStamped, self.callback_inspect_roi)
-			self.sub_roi_marker = rospy.Subscriber(f"/marker_locations/id/{self.ROI_ARUCO_ID}", PointStamped, self.callback_inspect_roi, callback_args=False)
+			self.sub_roi_person = rospy.Subscriber(f"/marker_locations/id/person", PointStamped, self.callback_inspect_roi, callback_args=False)
+			self.sub_roi_bag = rospy.Subscriber(f"/marker_locations/id/bag", PointStamped, self.callback_inspect_roi, callback_args=False)
 			self.sub_landing_marker = None
 
 			# Create a ROS publisher to send messages to the 'servo*/set' topic.
-			self.s1_pub = rospy.Publisher("/servo1/set", Bool, queue_size=10)
-			self.s2_pub = rospy.Publisher("/servo2/set", Bool, queue_size=10)
+			self.pub_epipen = rospy.Publisher("/servo1/set", Bool, queue_size=10)
+			self.pub_tracker = rospy.Publisher("/servo2/set", Bool, queue_size=10)
 
 			# Take off to a configured height; block until complete
 			self.send_takeoff_motion()
@@ -253,6 +253,11 @@ class autopilot():
 		if topic in self.visited_rois:
 			rospy.loginfo_throttle_identical(2, "already visited topic=%s", topic)
 			return
+	
+		# Extract the "id" from the topic (last part of the path)
+		roi_id = topic.split("/")[-1]  # will be "person" or "bag"
+		
+		rospy.loginfo(f"ROI diversion triggered for id: {roi_id}")
 
 		# Record our current location so we can return to it later
 		start_x = float(self.current_location.x)
@@ -266,7 +271,8 @@ class autopilot():
 		
 		# Set the "diversion waypoint" (at yaw zero)
 		# editing from msg_in.pose.position.z to start_z
-		dwp = [msg_in.point.x, msg_in.point.y, start_z, current_yaw]
+		# descend to 0.8 for payload deployment
+		dwp = [msg_in.point.x, msg_in.point.y, 0.8, current_yaw]
 		
 		if not self.check_waypoint(dwp):
 			rospy.logwarn_throttle_identical(2, "Bad ROI waypoint, outside of safe flight zone!\nCancelling diversion...")
@@ -311,15 +317,21 @@ class autopilot():
 
 		# !!!: Change this to modify behaviour at ROIs
 		if not landing: # deployment roi
-			rospy.loginfo("Hovering at deployment waypoint...")
-			rospy.loginfo("Deploying payload 1...")
-			self.s1_pub.publish(Bool(True))
-			rospy.loginfo("Waiting 5 seconds...")
-			rospy.sleep(5)
-			rospy.loginfo("Deploying payload 2...")
-			self.s2_pub.publish(Bool(True))
-			rospy.loginfo("Waiting 5 seconds...")
-			rospy.sleep(5)
+			if roi_id == "person":
+				rospy.loginfo("Hovering over person...")
+				rospy.loginfo("Deploying epipen payload...")
+				self.pub_epipen.publish(Bool(True))
+				rospy.loginfo("Hovering for 5 seconds...")
+				rospy.sleep(rospy.Duration(self.loiter_time))
+			elif roi_id == "bag":
+				rospy.loginfo("Hovering over bag...")
+				rospy.loginfo("Deploying tracker payload...")
+				self.pub_tracker.publish(Bool(True))
+				rospy.loginfo("Hovering for 5 seconds...")
+				rospy.sleep(rospy.Duration(self.loiter_time))
+			else:
+				rospy.loginfo("Hovering over ROI...")
+				rospy.sleep(rospy.Duration(self.loiter_time))
 
 		# Land if landing flag true
 		if landing:
@@ -532,14 +544,14 @@ def main(args):
 	# List of waypoints
 	# [X, Y, Z, Yaw]
 	wps = [[ -1.0, -1.0,  ALTITUDE, 0.0],
-		   [ -3.7, -2.3,  ALTITUDE, 0.0],
-		   [  3.7, -2.3,  ALTITUDE, 0.0],
+		   [ -3.7, -2.4,  ALTITUDE, 0.0],
+		   [  3.7, -2.4,  ALTITUDE, 0.0],
 		   [  3.7, -0.83, ALTITUDE, 0.0],
 		   [ -3.7, -0.83, ALTITUDE, 0.0],
 		   [ -3.7,  0.83, ALTITUDE, 0.0],
 		   [  3.7,  0.83, ALTITUDE, 0.0],
-		   [  3.7,  2.3,  ALTITUDE, 0.0],
-		   [ -3.7,  2.3,  ALTITUDE, 0.0]]
+		   [  3.7,  1.9,  ALTITUDE, 0.0],
+		   [ -3.7,  1.9,  ALTITUDE, 0.0]]
 
 	# Create our Autopilot class option
 	pilot = autopilot(wps, config)
