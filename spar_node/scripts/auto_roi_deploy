@@ -6,6 +6,8 @@
 import sys
 import os
 from math import *
+import json
+import numpy as np
 
 import rospy
 # rospy = ROS 1's Python client library (allows this script to act as a ROS node,
@@ -68,6 +70,11 @@ from nav_msgs.msg import OccupancyGrid
 import yaml
 #----------------------------------------------------------------------------------------------------------------------------------------------------------------
 
+# --- Mission bounds
+X_MIN, X_MAX = -3.8,  3.8
+Y_MIN, Y_MAX = -2.5,  2.0
+Z_MIN, Z_MAX =  0.5,  4.0
+
 # This is getting a bit more complicated now, so we'll put our information in
 # a class to keep track of all of our variables. This is not so much different
 # to the previous methods, other than the fact that the class will operate
@@ -76,10 +83,6 @@ import yaml
 # will call it's own functions as callbacks, etc.
 class autopilot():
 	def __init__(self, waypoints, config):
-		# --- Mission bounds
-		self.X_MIN, self.X_MAX = -3.8,  3.8
-		self.Y_MIN, self.Y_MAX = -2.5,  2.0
-		self.Z_MIN, self.Z_MAX =  0.5,  4.0
 
 		# Make sure we have a valid waypoint list
 		if not self.check_waypoints(waypoints):
@@ -240,13 +243,13 @@ class autopilot():
 			return False
 		# Make sure waypoint is within mission zone
 		x, y, z, yaw = wp
-		if x > self.X_MAX or x < self.X_MIN:
+		if x > X_MAX or x < X_MIN:
 			rospy.logwarn("Waypoint x=%.2f outside [-3.8, 3.8]" % x)
 			return False
-		if y > self.Y_MAX or y < self.Y_MIN:
+		if y > Y_MAX or y < Y_MIN:
 			rospy.logwarn("Waypoint y=%.2f outside [-2.5, 2.0]" % y)
 			return False
-		if z > self.Z_MAX or z < self.Z_MIN:
+		if z > Z_MAX or z < Z_MIN:
 			rospy.logwarn("Waypoint z=%.2f outside [0, 0.5]" % z)
 			return False
 
@@ -286,7 +289,7 @@ class autopilot():
 
 		# Extract the "id" from the topic (last part of the path)
 		roi_id = topic.split("/")[-1]  # will be "person" or "bag"
-		rospy.loginfo(f"ROI diversion triggered for id: {roi_id}")
+		rospy.loginfo_throttle_identical(5, f"ROI diversion triggered for id: {roi_id}")
 
 		# Record our current location so we can return to it later
 		start_x = float(self.current_location.x)
@@ -638,7 +641,7 @@ class autopilot():
 		return max(vmin, min(v, vmax))
 
 	def _in_xy_bounds(self, x, y):
-		return (self.X_MIN <= x <= self.X_MAX) and (self.Y_MIN <= y <= self.Y_MAX)
+		return (X_MIN <= x <= X_MAX) and (Y_MIN <= y <= Y_MAX)
 
 	def _cb_grid(self, msg):
 		self.grid = msg
@@ -680,8 +683,8 @@ class autopilot():
 		returns (x,y) clamped to mission box (still may be occupied).
 		"""
 		# First clamp to mission bounds so we don't search outside
-		x = self._clamp(x, self.X_MIN, self.X_MAX)
-		y = self._clamp(y, self.Y_MIN, self.Y_MAX)
+		x = self._clamp(x, X_MIN, X_MAX)
+		y = self._clamp(y, Y_MIN, Y_MAX)
 
 		if self._is_free(x, y):
 			return x, y
@@ -695,8 +698,8 @@ class autopilot():
 		while r <= max_radius:
 			for k in range(angular_samples):
 				th = (2.0 * pi * k) / float(angular_samples)
-				xt = self._clamp(x + r * cos(th), self.X_MIN, self.X_MAX)
-				yt = self._clamp(y + r * sin(th), self.Y_MIN, self.Y_MAX)
+				xt = self._clamp(x + r * cos(th), X_MIN, X_MAX)
+				yt = self._clamp(y + r * sin(th), Y_MIN, Y_MAX)
 				if self._is_free(xt, yt):
 					return xt, yt
 			r += res
@@ -714,7 +717,7 @@ class autopilot():
 		sx, sy = self._snap_to_free_bounded(x, y, max_radius=max_radius)
 
 		# clamp z strictly to mission vertical bounds
-		sz = self._clamp(z, self.Z_MIN, self.Z_MAX)
+		sz = self._clamp(z, Z_MIN, Z_MAX)
 
 		snapped = [sx, sy, sz, yaw]
 
@@ -758,6 +761,108 @@ class autopilot():
 		_, _, yaw = euler_from_quaternion([q.x, q.y, q.z, q.w])
 		return yaw
 
+# ===================== Planner (X up, Y left) =====================
+
+def path_planner_xyleft(
+	Xmin=-3.75, Xmax=3.75,     # vertical extent (up/down)
+	Ymin=-2.45, Ymax= 1.95,    # horizontal extent (right/left)
+	startXY=(-1.0, -1.0),    # (X, Y) at ground
+	altitude=3.0,
+	fov_x_deg=54.0,          # across-track FOV (affects row spacing)
+	fov_y_deg=None,          # along-track FOV (image width). If None, equals fov_x_deg
+	overlap_across=0.30,     # across-track overlap between rows
+	yaw=0.0,
+	takeoff_alt=1.0,
+	ensure_cover=True,
+	n_midpoints = 3,
+	start_side="right",      # "right" = start at (Xmin, Ymin), first row right->left
+):
+	"""
+	World frame:
+	  +X up, +Y left. Waypoints returned as [X, Y, Z, yaw].
+
+	Returns:
+	  waypoints: (N,4)
+	  X_rows:    1D array of row X positions (bottom->top)
+	  frame_X:   ground footprint size along X (meters)
+	  frame_Y:   ground footprint size along Y (meters)
+	  survey_indices: indices of survey-only points in the waypoint list
+	"""
+	if fov_y_deg is None:
+		fov_y_deg = fov_x_deg
+
+	# Ground image footprint (FULL FOVs)
+	frame_X = 2.0 * altitude * np.tan(np.deg2rad(0.5 * fov_x_deg))  # along +X
+	frame_Y = 2.0 * altitude * np.tan(np.deg2rad(0.5 * fov_y_deg))  # along +Y
+
+	# Row spacing from overlap
+	overlap_across = float(np.clip(overlap_across, 0.0, 0.99))
+	dX = max(frame_X * (1.0 - overlap_across), 1e-6)
+
+	# # Build rows in X (bottom -> top)
+	# X_rows = [Xmin]
+	# while X_rows[-1] + dX < Xmax:
+	#     X_rows.append(X_rows[-1] + dX)
+	# if ensure_cover and X_rows[-1] < Xmax:
+	#     X_rows.append(Xmax)
+	# X_rows = np.asarray(X_rows, float)
+
+	# Build rows in X (bottom -> top) with even spacing that honors endpoints
+	# Previous behavior walked by dX and then optionally forced Xmax,
+	# which could create two rows very close together at the top.
+	# We instead choose the number of intervals so spacing <= dX and include Xmin/Xmax.
+	span = (Xmax - Xmin)
+	if span <= 0:
+		X_rows = np.asarray([Xmin], float)
+	else:
+		# number of intervals so that spacing <= dX (never bigger than requested)
+		n_intervals = max(1, int(np.ceil(span / dX)))
+		X_rows = np.linspace(Xmin, Xmax, n_intervals + 1, dtype=float)
+
+	# First row direction: start at bottom-right if start_side == "right"
+	first_right_to_left = (start_side.lower() == "right")
+
+	# Survey points: alternating sweeps along Y
+	survey_pts = []
+	for i, X in enumerate(X_rows):
+		rtl = first_right_to_left if (i % 2 == 0) else (not first_right_to_left)
+		if rtl:
+			a = [X, Ymin, altitude, yaw]  # right
+			b = [X, Ymax, altitude, yaw]  # left
+		else:
+			a = [X, Ymax, altitude, yaw]  # left
+			b = [X, Ymin, altitude, yaw]  # right
+
+		row_pts = [a]
+		if n_midpoints > 0:
+			for k in range(1, n_midpoints+1):
+				frac = k / (n_midpoints + 1)
+				mY = a[1] + frac * (b[1] - a[1])
+				row_pts.append([X, mY, altitude, yaw])
+		row_pts.append(b)
+
+		survey_pts += row_pts
+	survey_pts = np.asarray(survey_pts, float)
+
+	# Stitch with staging/return
+	Sx, Sy = startXY
+	waypoints = []
+	waypoints.append([Sx, Sy, takeoff_alt, 0.0])  # (-1,-1,1,0)
+	waypoints.append([Sx, Sy, altitude,    0.0])  # (-1,-1,alt,0)
+
+	# ! Was causing a duplicate
+	# if survey_pts.size:
+	# 	fx, fy = survey_pts[0, 0], survey_pts[0, 1]
+	# 	if abs(fx - Sx) > 1e-9 or abs(fy - Sy) > 1e-9:
+	# 		waypoints.append([fx, fy, altitude, yaw])
+
+	survey_start_idx = len(waypoints)
+	waypoints.extend(survey_pts.tolist())
+	survey_end_idx = len(waypoints)
+
+	waypoints = np.asarray(waypoints, float)
+
+	return waypoints
 
 def main(args):
 	# Initialise ROS
@@ -773,28 +878,42 @@ def main(args):
 
 	# List of waypoints
 	# [X, Y, Z, Yaw]
-	wps = [
-			[-1.00, -1.00, 1.00, 0.00],
-			[-1.00, -1.00, ALTITUDE, 0.00],
-			[-3.70, -2.40, ALTITUDE, 0.00],
-			[-3.70, -0.25, ALTITUDE, 0.00],
-			[-3.70,  1.90, ALTITUDE, 0.00],
-			[-1.56,  1.90, ALTITUDE, 0.00],
-			[-1.56, -0.25, ALTITUDE, 0.00],
-			[-1.56, -2.40, ALTITUDE, 0.00],
-			[ 0.58, -2.40, ALTITUDE, 0.00],
-			[ 0.58, -0.25, ALTITUDE, 0.00],
-			[ 0.58,  1.90, ALTITUDE, 0.00],
-			[ 2.72,  1.90, ALTITUDE, 0.00],
-			[ 2.72, -0.25, ALTITUDE, 0.00],
-			[ 2.72, -2.40, ALTITUDE, 0.00],
-			[ 3.70, -2.40, ALTITUDE, 0.00],
-			[ 3.70, -0.25, ALTITUDE, 0.00],
-			[ 3.70,  1.90, ALTITUDE, 0.00]
-		]
+	wps = path_planner_xyleft(
+			Xmin=X_MIN, Xmax=X_MAX,
+			Ymin=Y_MIN, Ymax=Y_MAX,
+			startXY=(-1.0, -1.0),
+			altitude=ALTITUDE,
+			fov_x_deg=54.0,
+			fov_y_deg=54.0,
+			overlap_across=0.30,
+			yaw=0.0,
+			n_midpoints=3,
+			start_side="right"   # start at bottom-right
+		)
+	waypoints_list = [[round(val, 2) for val in row] for row in wps.tolist()]
+
+	# wps = [
+	# 		[-1.00, -1.00, 1.00, 0.00],
+	# 		[-1.00, -1.00, ALTITUDE, 0.00],
+	# 		[-3.70, -2.40, ALTITUDE, 0.00],
+	# 		[-3.70, -0.25, ALTITUDE, 0.00],
+	# 		[-3.70,  1.90, ALTITUDE, 0.00],
+	# 		[-1.56,  1.90, ALTITUDE, 0.00],
+	# 		[-1.56, -0.25, ALTITUDE, 0.00],
+	# 		[-1.56, -2.40, ALTITUDE, 0.00],
+	# 		[ 0.58, -2.40, ALTITUDE, 0.00],
+	# 		[ 0.58, -0.25, ALTITUDE, 0.00],
+	# 		[ 0.58,  1.90, ALTITUDE, 0.00],
+	# 		[ 2.72,  1.90, ALTITUDE, 0.00],
+	# 		[ 2.72, -0.25, ALTITUDE, 0.00],
+	# 		[ 2.72, -2.40, ALTITUDE, 0.00],
+	# 		[ 3.70, -2.40, ALTITUDE, 0.00],
+	# 		[ 3.70, -0.25, ALTITUDE, 0.00],
+	# 		[ 3.70,  1.90, ALTITUDE, 0.00]
+	# 	]
 
 	# Create our Autopilot class option
-	pilot = autopilot(wps, config)
+	pilot = autopilot(waypoints_list, config)
 
 	# rospy.spin() keeps the program running once setup is done.
 	# Without it, the script would exit immediately after starting.
