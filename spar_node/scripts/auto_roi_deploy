@@ -97,7 +97,7 @@ class autopilot():
 		self.have_pose = False  # becomes True in callback_pose once we receive a pose
 
 		# Set our linear and rotational velocities for the flight
-		self.vel_linear = rospy.get_param("~vel_linear", 0.2)
+		self.vel_linear = rospy.get_param("~vel_linear", 0.25)
 		self.vel_yaw = rospy.get_param("~vel_yaw", 0.2)
 
 		# Set our position and yaw waypoint accuracies
@@ -109,6 +109,8 @@ class autopilot():
 
 		# Record dict of visited ROIs
 		self.visited_rois = set()
+
+		self.payloads_deployed = {"person": False, "bag": False}
 
 		# Create an action client to talk to the flight controller
 		# -----------------------------------------------------------------
@@ -224,11 +226,12 @@ class autopilot():
 	def shutdown(self):
 		# Unregister anything that needs it here
 		self.sub_pose.unregister()
-		# self.sub_roi.unregister()
 		if self.sub_landing_marker is not None:
 			self.sub_landing_marker.unregister()
-		if self.sub_roi_marker is not None:
-			self.sub_roi_marker.unregister()
+		if self.sub_roi_person is not None:
+			self.sub_roi_person.unregister()
+		if self.sub_roi_bag is not None:
+			self.sub_roi_bag.unregister()
 		self.spar_client.cancel_goal()
 
 		rospy.loginfo("Autopilot stopped")
@@ -321,14 +324,16 @@ class autopilot():
 				rospy.loginfo("Hovering over person...")
 				rospy.loginfo("Deploying epipen payload...")
 				self.pub_epipen.publish(Bool(True))
-				rospy.loginfo("Hovering for 5 seconds...")
-				rospy.sleep(rospy.Duration(self.loiter_time))
+				self.payloads_deployed["person"] = True
+				rospy.loginfo("Hovering for 2 seconds...")
+				rospy.sleep(rospy.Duration(2))
 			elif roi_id == "bag":
 				rospy.loginfo("Hovering over bag...")
 				rospy.loginfo("Deploying tracker payload...")
 				self.pub_tracker.publish(Bool(True))
-				rospy.loginfo("Hovering for 5 seconds...")
-				rospy.sleep(rospy.Duration(self.loiter_time))
+				self.payloads_deployed["bag"] = True
+				rospy.loginfo("Hovering for 2 seconds...")
+				rospy.sleep(rospy.Duration(2))
 			else:
 				rospy.loginfo("Hovering over ROI...")
 				rospy.sleep(rospy.Duration(self.loiter_time))
@@ -414,7 +419,7 @@ class autopilot():
 		goal.motion = FlightMotionGoal.MOTION_TAKEOFF
 
 		# Parameters (private to this node). Change names if you prefer.
-		height = rospy.get_param("~height", 2.5)           # meters
+		height = rospy.get_param("~height", 1.0)           # meters
 		speed  = rospy.get_param("~speed",  0.3)           # m/s ascent speed
 
 		goal.position.z = height
@@ -515,6 +520,24 @@ class autopilot():
 					# Else the mission is over, shutdown and quit the node
 					# XXX:	This could be used to restart the mission back to the
 					#		first waypoint instead to restart the mission
+					rospy.loginfo_throttle_identical(5, "Search complete! Checking payloads deployed...")
+
+					if self.payloads_deployed["person"] == False:
+						rospy.loginfo("Hovering over person...")
+						rospy.loginfo("Deploying epipen payload...")
+						self.pub_epipen.publish(Bool(True))
+						self.payloads_deployed["person"] = True
+						rospy.loginfo("Hovering for 2 seconds...")
+						rospy.sleep(rospy.Duration(2))
+					
+					if self.payloads_deployed["bag"] == False:
+						rospy.loginfo("Hovering over bag...")
+						rospy.loginfo("Deploying tracker payload...")
+						self.pub_tracker.publish(Bool(True))
+						self.payloads_deployed["bag"] = True
+						rospy.loginfo("Hovering for 2 seconds...")
+						rospy.sleep(rospy.Duration(2))
+
 					rospy.loginfo_throttle_identical(5, "Mission complete! Landing...")
 					self.sub_landing_marker = rospy.Subscriber(f"/marker_locations/id/{self.LANDING_ARUCO_ID}", PointStamped, self.callback_inspect_roi, callback_args=True)
 					# self.send_land_motion()
@@ -543,15 +566,26 @@ def main(args):
 
 	# List of waypoints
 	# [X, Y, Z, Yaw]
-	wps = [[ -1.0, -1.0,  ALTITUDE, 0.0],
-		   [ -3.7, -2.4,  ALTITUDE, 0.0],
-		   [  3.7, -2.4,  ALTITUDE, 0.0],
-		   [  3.7, -0.83, ALTITUDE, 0.0],
-		   [ -3.7, -0.83, ALTITUDE, 0.0],
-		   [ -3.7,  0.83, ALTITUDE, 0.0],
-		   [  3.7,  0.83, ALTITUDE, 0.0],
-		   [  3.7,  1.9,  ALTITUDE, 0.0],
-		   [ -3.7,  1.9,  ALTITUDE, 0.0]]
+	wps = [
+			[-1.0,  -1.0,  1.0, 	 0.0],
+			[-1.0,  -1.0,  ALTITUDE, 0.0],
+			[-3.75, -2.45, ALTITUDE, 0.0],
+			[-3.75, -2.45, ALTITUDE, 0.0],
+			[-3.75,  0.0,  ALTITUDE, 0.0],
+			[-3.75,  1.95, ALTITUDE, 0.0],
+			[-1.51,  1.95, ALTITUDE, 0.0],
+			[-1.51,  0.0,  ALTITUDE, 0.0],
+			[-1.51, -2.45, ALTITUDE, 0.0],
+			[ 0.79, -2.45, ALTITUDE, 0.0],
+			[ 0.79,  0.0,  ALTITUDE, 0.0],
+			[ 0.79,  1.95, ALTITUDE, 0.0],
+			[ 3.08,  1.95, ALTITUDE, 0.0],
+			[ 3.08,  0.0,  ALTITUDE, 0.0],
+			[ 3.08, -2.45, ALTITUDE, 0.0],
+			[ 3.75, -2.45, ALTITUDE, 0.0],
+			[ 3.75,  0.0,  ALTITUDE, 0.0],
+			[ 3.75,  1.95, ALTITUDE, 0.0],
+		]
 
 	# Create our Autopilot class option
 	pilot = autopilot(wps, config)
