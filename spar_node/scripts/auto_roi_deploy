@@ -248,35 +248,29 @@ class autopilot():
 	# This function will fire whenever a ROI pose message is sent
 	# It is also responsible for handling the ROI "inspection task"
 	def callback_inspect_roi(self, msg_in: PointStamped, landing: bool = False):
-
 		# Check we haven't visited this roi already
 		hdr = getattr(msg_in, "_connection_header", {}) or {}
 		topic = hdr.get("topic")  # may be None in some contexts
 
-		if topic in self.visited_rois:
-			rospy.loginfo_throttle_identical(2, "already visited topic=%s", topic)
-			return
-	
 		# Extract the "id" from the topic (last part of the path)
 		roi_id = topic.split("/")[-1]  # will be "person" or "bag"
-		
 		rospy.loginfo(f"ROI diversion triggered for id: {roi_id}")
 
 		# Record our current location so we can return to it later
 		start_x = float(self.current_location.x)
 		start_y = float(self.current_location.y)
 		start_z = float(self.current_location.z)
-		
+
 		# XXX:	It would also be a good idea to capture "current yaw" from
 		#		the pose to maintain that throughout a diversion
-		
+
 		current_yaw = self.current_yaw
-		
+
 		# Set the "diversion waypoint" (at yaw zero)
 		# editing from msg_in.pose.position.z to start_z
 		# descend to 0.8 for payload deployment
 		dwp = [msg_in.point.x, msg_in.point.y, 0.8, current_yaw]
-		
+
 		if not self.check_waypoint(dwp):
 			rospy.logwarn_throttle_identical(2, "Bad ROI waypoint, outside of safe flight zone!\nCancelling diversion...")
 			return
@@ -291,11 +285,15 @@ class autopilot():
 			rospy.logwarn_throttle_identical(2, "No current pose yet; cannot divert to ROI.")
 			return
 
+		if topic in self.visited_rois:
+			rospy.loginfo_throttle_identical(2, "already visited topic=%s", topic)
+			return
+
 		# Set our flag that we are performing the diversion and cancel active goal
 		self.performing_roi = True
 		rospy.loginfo("Starting diversion to ROI...")
-		self.spar_client.cancel_goal()            
-		
+		self.spar_client.cancel_goal()
+
 		# Set the "return waypoint" (at yaw zero)
 		rwp = [start_x, start_y, start_z, current_yaw]
 
@@ -499,7 +497,7 @@ class autopilot():
 			#		(such as aborted), as there are some states
 			#		where we won't recover from, and should just exit
 			if self.spar_client.get_state() == GoalStatus.SUCCEEDED:
-				rospy.loginfo("Reached waypoint %i!" % (self.waypoint_counter))
+				rospy.loginfo_throttle_identical(5, "Reached waypoint %i!" % (self.waypoint_counter))
 
 				# XXX:	Another check could go here to finish the mission early
 				#		if "all" inspection tasks have been completed
@@ -523,15 +521,13 @@ class autopilot():
 					rospy.loginfo_throttle_identical(5, "Search complete! Checking payloads deployed...")
 
 					if self.payloads_deployed["person"] == False:
-						rospy.loginfo("Hovering over person...")
 						rospy.loginfo("Deploying epipen payload...")
 						self.pub_epipen.publish(Bool(True))
 						self.payloads_deployed["person"] = True
 						rospy.loginfo("Hovering for 2 seconds...")
 						rospy.sleep(rospy.Duration(2))
-					
+
 					if self.payloads_deployed["bag"] == False:
-						rospy.loginfo("Hovering over bag...")
 						rospy.loginfo("Deploying tracker payload...")
 						self.pub_tracker.publish(Bool(True))
 						self.payloads_deployed["bag"] = True
