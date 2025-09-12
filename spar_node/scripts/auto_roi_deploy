@@ -146,9 +146,9 @@ class autopilot():
 			self.sub_roi_bag = rospy.Subscriber(f"/marker_locations/id/bag", PointStamped, self.callback_inspect_roi, callback_args=False)
 			self.sub_landing_marker = None
 
-			# Create a ROS publisher to send messages to the 'servo*/set' topic.
-			self.pub_epipen = rospy.Publisher("/servo1/set", Bool, queue_size=10)
-			self.pub_tracker = rospy.Publisher("/servo2/set", Bool, queue_size=10)
+			# Create a ROS publisher to send messages to the '/payload/{PAYLOAD_TYPE}/set' topic.
+			self.pub_epipen = rospy.Publisher("/payload/epipen/set", Bool, queue_size=10)
+			self.pub_tracker = rospy.Publisher("/payload/tracker/set", Bool, queue_size=10)
 
 			# Take off to a configured height; block until complete
 			self.send_takeoff_motion()
