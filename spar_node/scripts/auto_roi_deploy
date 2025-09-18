@@ -324,17 +324,25 @@ class autopilot():
 			rospy.logwarn_throttle_identical(2, "No current pose yet; cannot divert to ROI.")
 			return
 
-		if topic in self.visited_rois:
-			rospy.loginfo_throttle_identical(2, "already visited topic=%s", topic)
-			return
+		if roi_id in self.visited_rois:
+			if self.visited_rois[roi_id]["repositioning_status"] == "completed":
+				rospy.loginfo_throttle_identical(2, "Already visited ROI=%s, cancelling diversion...", roi_id)
+				return
 
 		# Set our flag that we are performing the diversion and cancel active goal
 		self.performing_roi = True
-		rospy.loginfo("Starting diversion to ROI...")
-		self.spar_client.cancel_goal()
 
-		# Set the "return waypoint" (at yaw zero)
-		rwp = [start_x, start_y, start_z, current_yaw]
+		if not "repositioning_status" in self.visited_rois.get(roi_id, {}):
+			rospy.loginfo_throttle_identical(5, "Registering new ROI")
+			# Set the "return waypoint" (at yaw zero)
+			self.visited_rois[roi_id] = {"rwp": [start_x, start_y, start_z, current_yaw], "repositioning_status": "required", "diversion_calls": 1}
+
+			rospy.loginfo("Starting diversion to ROI...")
+		else:
+			rospy.loginfo_throttle_identical(5, "Repositioning above ROI...")
+			self.visited_rois[roi_id]["diversion_calls"] += 1
+
+		self.spar_client.cancel_goal()
 
 		# XXX: Could pause here for a moment with ( "rospy.sleep(...)" ) to make sure the UAV stops correctly
 
@@ -348,7 +356,16 @@ class autopilot():
 			return
 
 		rospy.loginfo("Reached diversion ROI!")
-		self.visited_rois.add(topic)
+
+		# Reposition
+		if self.visited_rois[roi_id]["repositioning_status"] == "required" and self.visited_rois[roi_id]["diversion_calls"] == 1:
+			# Allow callback to be retriggered
+			self.performing_roi = False
+			return
+		elif self.visited_rois[roi_id]["repositioning_status"] == "required" and self.visited_rois[roi_id]["diversion_calls"] > 1:
+			# Repositioning complete
+			self.visited_rois[roi_id]["repositioning_status"] = "completed"
+			self.visited_rois[roi_id]["position"] = dwp
 
 		# Loiter above ROI
 		if self.loiter_time > 0.0:
@@ -382,6 +399,7 @@ class autopilot():
 			try:
 				self.send_land_motion()
 				rospy.loginfo("ROI landing complete; shutting down.")
+				rospy.loginfo(json.dumps(self.visited_rois, indent=4))
 				rospy.signal_shutdown("complete")
 			except e:
 				rospy.signal_shutdown(f"roi_land_failed: {e}")
@@ -389,7 +407,7 @@ class autopilot():
 				return
 
 		rospy.loginfo("Returning to pre-diversion position...")
-		self.send_wp(rwp)
+		self.send_wp(self.visited_rois[roi_id]["rwp"])
 		self.spar_client.wait_for_result()
 		if self.spar_client.get_state() != GoalStatus.SUCCEEDED:
 			# Something went wrong, cancel out of guidance!
@@ -879,8 +897,8 @@ def main(args):
 	# List of waypoints
 	# [X, Y, Z, Yaw]
 	wps = path_planner_xyleft(
-			Xmin=X_MIN, Xmax=X_MAX,
-			Ymin=Y_MIN, Ymax=Y_MAX,
+			Xmin=X_MIN + 0.1, Xmax=X_MAX - 0.1,
+			Ymin=Y_MIN + 0.1, Ymax=Y_MAX - 0.1,
 			startXY=(-1.0, -1.0),
 			altitude=ALTITUDE,
 			fov_x_deg=54.0,
