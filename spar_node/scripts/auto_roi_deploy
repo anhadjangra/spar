@@ -66,6 +66,8 @@ from breadcrumb.srv import RequestPathRequest
 from nav_msgs.msg import Path
 from nav_msgs.msg import OccupancyGrid
 
+# For battery monitoring
+from sensor_msgs.msg import BatteryState
 
 import yaml
 #----------------------------------------------------------------------------------------------------------------------------------------------------------------
@@ -167,6 +169,8 @@ class autopilot():
 			self.sub_pose = rospy.Subscriber("/mavros/local_position/pose",
 								 PoseStamped,
 								 self.callback_pose)
+
+			self.sub_battery = rospy.Subscriber(f"/mavros/battery", BatteryState, self.callback_battery_monitor, callback_args=False)
 
 			# --- Occupancy Grid (for snapping waypoints out of obstacles)
 			self.grid = None
@@ -397,10 +401,7 @@ class autopilot():
 			# Land at ROI
 			rospy.loginfo("Setting down at ROI")
 			try:
-				self.send_land_motion()
-				rospy.loginfo("ROI landing complete; shutting down.")
-				rospy.loginfo(json.dumps(self.visited_rois, indent=4))
-				rospy.signal_shutdown("complete")
+				self.land()
 			except e:
 				rospy.signal_shutdown(f"roi_land_failed: {e}")
 				self.performing_roi = False
@@ -421,6 +422,106 @@ class autopilot():
 		# Unset our flag that we are performing a diversion
 		# to allow the waypoint timer to take back over
 		self.performing_roi = False
+
+
+	def callback_battery_monitor(self, msg_in: BatteryState):
+		try:
+			pct = float(msg_in.percentage)
+			if pct > 0 and pct < 0.20: # when battery drops below under 20%
+				rospy.logwarn_throttle_identical(5, f"Critical Low Battery: {pct*100:.1f}%")
+				rospy.logwarn_throttle_identical(5, f"Commencing emergency landing...")
+
+				# Stop any ROI diversion, cancel guidance, and land safely
+				try:
+					self.performing_roi = False
+					self.spar_client.cancel_goal()
+				except Exception:
+					pass
+
+				# Attempt emergency landing (try ARUCO latch, else fallback)
+				self.emergency_land()
+
+		except Exception as e:
+			rospy.logwarn_throttle_identical(5, f"Battery percentage read error: {e}")
+			return
+
+	def emergency_land(self):
+		"""Emergency landing sequence:
+		1) Try to get latched landing ARUCO quickly.
+		2) Else land at predefined safe point.
+		"""
+		if not self.have_pose:
+			rospy.logwarn_throttle_identical(3, "No current pose; attempting straight LAND.")
+			try:
+				rospy.loginfo("Emergency LAND command issued without pose.")
+				self.land()
+			except Exception as e:
+				rospy.logerr(f"Emergency LAND failed: {e}")
+			return
+
+		wait_timeout = 3.0 # seconds to wait for latched ARUCO
+		current_yaw = self.current_yaw
+
+		# Try to acquire latched landing ARUCO quickly
+		topic = f"/marker_locations/id/{self.LANDING_ARUCO_ID}"
+		rospy.loginfo(f"[EMERG] Waiting up to {wait_timeout:.1f}s for latched ARUCO on {topic}...")
+		aruco_pt = None
+		try:
+			# If the topic is latched and was published before, this returns immediately.
+			msg_in = rospy.wait_for_message(topic, PointStamped, timeout=wait_timeout)
+			aruco_pt = [msg_in.point.x, msg_in.point.y, 0.8, current_yaw]
+			rospy.loginfo("[EMERG] Latched ARUCO acquired.")
+		except Exception:
+			rospy.logwarn("[EMERG] No ARUCO available; falling back to predefined safe landing point.")
+
+		# Choose target - LANDING marker if found, else fallback point (takeoff location)
+		if aruco_pt is not None:
+			target = aruco_pt
+		else:
+			target = [-1.0, -1.0, 0.8, current_yaw]
+
+		twp = self.snap_wp_in_mission(target)
+
+		if not self.check_waypoint(twp):
+			rospy.logerr("[EMERG] Landing waypoint is outside safe flight zone. Issuing direct LAND.")
+			try:
+				self.land()
+			except Exception as e:
+				rospy.logerr(f"[EMERG] Direct LAND failed: {e}")
+			return
+
+		# Cancel any active goal and fly to approach altitude
+		self.spar_client.cancel_goal()
+		rospy.sleep(rospy.Duration(0.3))  # brief pause to let controller settle
+		rospy.loginfo("[EMERG] Navigating to emergency landing approach point...")
+		self.send_wp(twp)
+		self.spar_client.wait_for_result()
+
+		if self.spar_client.get_state() != GoalStatus.SUCCEEDED:
+			rospy.logerr("[EMERG] Could not reach target landing spot. Issuing direct LAND.")
+			try:
+				self.land()
+			except Exception as e:
+				rospy.logerr(f"[EMERG] Direct LAND failed: {e}")
+			return
+
+		# Stabilize
+		if self.loiter_time > 0.0:
+			rospy.loginfo(f"[EMERG] Stabilizing over landing point for {self.loiter_time:.1f}s...")
+			rospy.sleep(rospy.Duration(self.loiter_time))
+
+		rospy.loginfo("[EMERG] Initiating final landing...")
+		try:
+			self.land()
+			rospy.loginfo("[EMERG] Landing complete.")
+		except Exception as e:
+			rospy.logerr(f"[EMERG] Landing command failed: {e}")
+
+	def land(self):
+		self.send_land_motion()
+		rospy.loginfo("ROI landing complete; shutting down.")
+		rospy.loginfo(json.dumps(self.visited_rois, indent=4))
+		rospy.signal_shutdown("complete")
 
 
 	# This function is for convinience to simply send out a new waypoint
@@ -650,8 +751,7 @@ class autopilot():
 
 					rospy.loginfo_throttle_identical(5, "Mission complete! Landing...")
 					self.sub_landing_marker = rospy.Subscriber(f"/marker_locations/id/{self.LANDING_ARUCO_ID}", PointStamped, self.callback_inspect_roi, callback_args=True)
-					# self.send_land_motion()
-					# rospy.signal_shutdown("complete")
+
 			elif (self.spar_client.get_state() == GoalStatus.PREEMPTED) or (self.spar_client.get_state() == GoalStatus.ABORTED) or (self.spar_client.get_state() == GoalStatus.REJECTED):
 				rospy.loginfo("Mission cancelled!")
 				rospy.signal_shutdown("cancelled")
