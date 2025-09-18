@@ -335,12 +335,12 @@ class autopilot():
 		if not "repositioning_status" in self.visited_rois.get(roi_id, {}):
 			rospy.loginfo_throttle_identical(5, "Registering new ROI")
 			# Set the "return waypoint" (at yaw zero)
-			self.visited_rois[roi_id] = {"rwp": [start_x, start_y, start_z, current_yaw], "repositioning_status": "required", "diversion_calls": 1}
+			self.visited_rois[roi_id] = {"rwp": [start_x, start_y, start_z, current_yaw], "repositioning_status": "required"}
 
 			rospy.loginfo("Starting diversion to ROI...")
 		else:
 			rospy.loginfo_throttle_identical(5, "Repositioning above ROI...")
-			self.visited_rois[roi_id]["diversion_calls"] += 1
+			self.visited_rois[roi_id]["repositioning_status"] = "repositioning"
 
 		self.spar_client.cancel_goal()
 
@@ -357,12 +357,12 @@ class autopilot():
 
 		rospy.loginfo("Reached diversion ROI!")
 
-		# Reposition
-		if self.visited_rois[roi_id]["repositioning_status"] == "required" and self.visited_rois[roi_id]["diversion_calls"] == 1:
-			# Allow callback to be retriggered
+		# Repositioning logic
+		if self.visited_rois[roi_id]["repositioning_status"] == "required":
+			# Allow callback to be retriggered and divert to more updated ROI position
 			self.performing_roi = False
 			return
-		elif self.visited_rois[roi_id]["repositioning_status"] == "required" and self.visited_rois[roi_id]["diversion_calls"] > 1:
+		elif self.visited_rois[roi_id]["repositioning_status"] == "repositioning":
 			# Repositioning complete
 			self.visited_rois[roi_id]["repositioning_status"] = "completed"
 			self.visited_rois[roi_id]["position"] = dwp
