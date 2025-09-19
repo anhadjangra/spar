@@ -104,6 +104,7 @@ class autopilot():
 		# This will stop our "waypoint is reached" callback from firing
 		# during the roi diversion and taking over our flight!
 		self.performing_roi = False
+		self.performing_emergency = False
 
 		# Save the input waypoints
 		self.waypoints = waypoints
@@ -275,6 +276,52 @@ class autopilot():
 
 		rospy.loginfo("Autopilot stopped")
 
+	def _run_breadcrumb_segment(self, start_xyz, end_xyz, yaw_for_segment):
+		"""
+		Runs a Breadcrumb plan from start_xyz -> end_xyz.
+		start_xyz/end_xyz: (x, y, z)
+		yaw_for_segment   : float (rad); we keep yaw constant along segment
+		Returns True on success, False if planning/execution failed.
+		"""
+		try:
+			# Snap endpoints to mission bounds
+			s_start = self.snap_wp_in_mission([start_xyz[0], start_xyz[1], start_xyz[2], 0.0])
+			s_end   = self.snap_wp_in_mission([end_xyz[0],   end_xyz[1],   end_xyz[2],   0.0])
+
+			req = RequestPathRequest()
+			req.start.x, req.start.y, req.start.z = s_start[0], s_start[1], s_start[2]
+			req.end.x,   req.end.y,   req.end.z   = s_end[0],   s_end[1],   s_end[2]
+
+			res = self.srvc_bc(req)
+			breadcrumbWPS = []
+
+			if len(res.path.poses) == 0:
+				rospy.logwarn_throttle_identical(5, "[BC] No breadcrumb solution; falling back to direct.")
+				return False
+			
+			# Loop through the solution returned from breadcrumb
+			for i in range(len(res.path.poses)):
+				rospy.loginfo(" [%0.2f;%0.2f;%0.2f]", res.path.poses[i].position.x, res.path.poses[i].position.y, res.path.poses[i].position.z)
+				breadcrumbWPS.append([res.path.poses[i].position.x, res.path.poses[i].position.y, res.path.poses[i].position.z, 0.0])
+				
+			# Display the path
+			self.breadcrumbWPS = breadcrumbWPS
+			self.display_path(breadcrumbWPS,"/nav/pathBreadcrumb")
+
+			for i, pose in enumerate(res.path.poses):
+				wp = [pose.position.x, pose.position.y, pose.position.z, yaw_for_segment]
+				self.send_wp(wp)
+				self.spar_client.wait_for_result()
+				if self.spar_client.get_state() != GoalStatus.SUCCEEDED:
+					rospy.logerr("[BC] Segment step %d failed; aborting breadcrumb execution.", i)
+					return False
+
+			return True
+
+		except Exception as e:
+			rospy.logerr("[BC] Exception while executing breadcrumb segment: %s", e)
+			return False
+
 
 	def callback_pose(self, msg_in: PoseStamped):
 		# Position snapshot (for returns)
@@ -352,12 +399,17 @@ class autopilot():
 
 		rospy.sleep(rospy.Duration(0.5))
 
-		self.send_wp(dwp)
-		self.spar_client.wait_for_result()
-		if self.spar_client.get_state() != GoalStatus.SUCCEEDED:
-			# Something went wrong, cancel out of guidance!
-			rospy.signal_shutdown("cancelled")
-			return
+		# Try obstacle-aware path to ROI
+		start_xyz = (float(self.current_location.x), float(self.current_location.y), float(self.current_location.z))
+		end_xyz   = (dwp[0], dwp[1], dwp[2])
+
+		if not self._run_breadcrumb_segment(start_xyz, end_xyz, current_yaw):
+			# Fallback: direct leg if Breadcrumb couldn't solve
+			self.send_wp(dwp)
+			self.spar_client.wait_for_result()
+			if self.spar_client.get_state() != GoalStatus.SUCCEEDED:
+				rospy.signal_shutdown("cancelled")
+				return
 
 		rospy.loginfo("Reached diversion ROI!")
 
@@ -408,12 +460,17 @@ class autopilot():
 				return
 
 		rospy.loginfo("Returning to pre-diversion position...")
-		self.send_wp(self.visited_rois[roi_id]["rwp"])
-		self.spar_client.wait_for_result()
-		if self.spar_client.get_state() != GoalStatus.SUCCEEDED:
-			# Something went wrong, cancel out of guidance!
-			rospy.signal_shutdown("cancelled")
-			return
+		rwp = self.visited_rois[roi_id]["rwp"]
+		start_xyz = (float(self.current_location.x), float(self.current_location.y), float(self.current_location.z))
+		end_xyz   = (rwp[0], rwp[1], rwp[2])
+
+		if not self._run_breadcrumb_segment(start_xyz, end_xyz, current_yaw):
+			# Fallback: direct leg
+			self.send_wp(rwp)
+			self.spar_client.wait_for_result()
+			if self.spar_client.get_state() != GoalStatus.SUCCEEDED:
+				rospy.signal_shutdown("cancelled")
+				return
 
 		# "waypoint_counter" represents the "next waypoint"
 		# "waypoint_counter - 1" represents the "current waypoint"
@@ -434,11 +491,12 @@ class autopilot():
 				# Stop any ROI diversion, cancel guidance, and land safely
 				try:
 					self.performing_roi = False
+					self.performing_emergency = True
 					self.spar_client.cancel_goal()
 				except Exception:
 					pass
 
-				# Attempt emergency landing (try ARUCO latch, else fallback)
+				# Attempt emergency landing (try ARUCO latch, else fallback to launch)
 				self.emergency_land()
 
 		except Exception as e:
@@ -494,16 +552,23 @@ class autopilot():
 		self.spar_client.cancel_goal()
 		rospy.sleep(rospy.Duration(0.3))  # brief pause to let controller settle
 		rospy.loginfo("[EMERG] Navigating to emergency landing approach point...")
-		self.send_wp(twp)
-		self.spar_client.wait_for_result()
+		
+		# Move toward the landing target with obstacle-aware path if possible
+		start_xyz = (float(self.current_location.x), float(self.current_location.y), float(self.current_location.z))
+		end_xyz   = (twp[0], twp[1], twp[2])
 
-		if self.spar_client.get_state() != GoalStatus.SUCCEEDED:
-			rospy.logerr("[EMERG] Could not reach target landing spot. Issuing direct LAND.")
-			try:
-				self.land()
-			except Exception as e:
-				rospy.logerr(f"[EMERG] Direct LAND failed: {e}")
-			return
+		ok = self._run_breadcrumb_segment(start_xyz, end_xyz, self.current_yaw)
+		if not ok:
+			rospy.logwarn("[EMERG] Breadcrumb failed; attempting direct leg to landing point.")
+			self.send_wp(twp)
+			self.spar_client.wait_for_result()
+			if self.spar_client.get_state() != GoalStatus.SUCCEEDED:
+				rospy.logerr("[EMERG] Could not reach landing point; issuing immediate LAND here.")
+				try:
+					self.land()
+				except Exception as e:
+					rospy.logerr(f"[EMERG] Direct LAND failed: {e}")
+				return
 
 		# Stabilize
 		if self.loiter_time > 0.0:
@@ -516,6 +581,7 @@ class autopilot():
 			rospy.loginfo("[EMERG] Landing complete.")
 		except Exception as e:
 			rospy.logerr(f"[EMERG] Landing command failed: {e}")
+		return
 
 	def land(self):
 		self.send_land_motion()
@@ -647,7 +713,7 @@ class autopilot():
 	def check_waypoint_status(self, te):
 		# If we're performing the ROI diversion, then don't do
 		# anything here, as this is handled in that function
-		if not self.performing_roi:
+		if not self.performing_roi or not self.performing_emergency:
 			# If the last segment has succeeded.
 			# For more complex tasks, it might be necessary to also
 			# check if you are in waypoint or diversion mode here.
