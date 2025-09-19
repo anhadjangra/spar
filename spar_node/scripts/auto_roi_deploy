@@ -84,11 +84,13 @@ Z_MIN, Z_MAX =  0.5,  4.0
 # i.e. it will have it's own publishers, subscribers, etc., that
 # will call it's own functions as callbacks, etc.
 class autopilot():
-	def __init__(self, waypoints, config):
-
+	def __init__(self, waypoints, config, pub_mission_status):
 		# Make sure we have a valid waypoint list
 		if not self.check_waypoints(waypoints):
 			raise ValueError("Invalid waypoint list input!")
+
+		self.pub_mission_status = pub_mission_status
+		self.pub_mission_status.publish("INITIALISING")
 
 		self.LANDING_ARUCO_ID = config["landing_aruco_id"]
 		self.ALTITUDE = config["altitude"]
@@ -264,6 +266,7 @@ class autopilot():
 
 	# This function will make sure we shut down the node as safely as possible
 	def shutdown(self):
+		self.pub_mission_status.publish("SHUTTING DOWN")
 		# Unregister anything that needs it here
 		self.sub_pose.unregister()
 		if self.sub_landing_marker is not None:
@@ -275,6 +278,7 @@ class autopilot():
 		self.spar_client.cancel_goal()
 
 		rospy.loginfo("Autopilot stopped")
+		self.pub_mission_status.publish("MISSION COMPLETE")
 
 	def _run_breadcrumb_segment(self, start_xyz, end_xyz, yaw_for_segment):
 		"""
@@ -389,9 +393,11 @@ class autopilot():
 			self.visited_rois[roi_id] = {"rwp": [start_x, start_y, start_z, current_yaw], "repositioning_status": "required"}
 
 			rospy.loginfo("Starting diversion to ROI...")
+			self.pub_mission_status.publish("DIVERTING")
 		else:
 			rospy.loginfo_throttle_identical(5, "Repositioning above ROI...")
 			self.visited_rois[roi_id]["repositioning_status"] = "repositioning"
+			self.pub_mission_status.publish("REPOSITIOING")
 
 		self.spar_client.cancel_goal()
 
@@ -425,12 +431,14 @@ class autopilot():
 
 		# Loiter above ROI
 		if self.loiter_time > 0.0:
+			self.pub_mission_status.publish("STABILISING")
 			rospy.loginfo("Hovering over ROI for %.1f s", self.loiter_time)
 			rospy.sleep(rospy.Duration(self.loiter_time))
 
 		# !!!: Change this to modify behaviour at ROIs
 		if not landing: # deployment roi
 			if roi_id == "person":
+				self.pub_mission_status.publish("DEPLOYING EPIPEN")
 				rospy.loginfo("Hovering over person...")
 				rospy.loginfo("Deploying epipen payload...")
 				self.pub_epipen.publish(Bool(True))
@@ -438,6 +446,7 @@ class autopilot():
 				rospy.loginfo("Hovering for 2 seconds...")
 				rospy.sleep(rospy.Duration(2))
 			elif roi_id == "bag":
+				self.pub_mission_status.publish("DEPLOYING TRACKER")
 				rospy.loginfo("Hovering over bag...")
 				rospy.loginfo("Deploying tracker payload...")
 				self.pub_tracker.publish(Bool(True))
@@ -460,6 +469,7 @@ class autopilot():
 				return
 
 		rospy.loginfo("Returning to pre-diversion position...")
+		self.pub_mission_status.publish("RETURNING")
 		rwp = self.visited_rois[roi_id]["rwp"]
 		start_xyz = (float(self.current_location.x), float(self.current_location.y), float(self.current_location.z))
 		end_xyz   = (rwp[0], rwp[1], rwp[2])
@@ -496,6 +506,7 @@ class autopilot():
 				except Exception:
 					pass
 
+				self.pub_mission_status.publish("LOW BATTERY")
 				# Attempt emergency landing (try ARUCO latch, else fallback to launch)
 				self.emergency_land()
 
@@ -584,6 +595,7 @@ class autopilot():
 		return
 
 	def land(self):
+		self.pub_mission_status.publish("LANDING")
 		self.send_land_motion()
 		rospy.loginfo("ROI landing complete; shutting down.")
 		rospy.loginfo(json.dumps(self.visited_rois, indent=4))
@@ -637,6 +649,7 @@ class autopilot():
 		Command a vertical takeoff using SPAR's FlightMotionAction.
 		Blocks until the server reports success/failure.
 		"""
+		self.pub_mission_status.publish("TAKEOFF")
 		goal = FlightMotionGoal()
 		goal.motion = FlightMotionGoal.MOTION_TAKEOFF
 
@@ -729,6 +742,7 @@ class autopilot():
 				#		 an "elif" check instead.
 				#		 i.e. if complete; elif more wps; else wps finished)
 				if self.waypoint_counter < (len(self.waypoints)):
+					self.pub_mission_status.publish("SEARCHING")
 
 					if not self.breadcrumbMode:
 
@@ -800,8 +814,10 @@ class autopilot():
 					# XXX:	This could be used to restart the mission back to the
 					#		first waypoint instead to restart the mission
 					rospy.loginfo_throttle_identical(5, "Search complete! Checking payloads deployed...")
+					self.pub_mission_status.publish("SEARCH COMPLETE")
 
 					if self.payloads_deployed["person"] == False:
+						self.pub_mission_status.publish("DEPLOYING EPIPEN")
 						rospy.loginfo("Deploying epipen payload...")
 						self.pub_epipen.publish(Bool(True))
 						self.payloads_deployed["person"] = True
@@ -809,6 +825,7 @@ class autopilot():
 						rospy.sleep(rospy.Duration(2))
 
 					if self.payloads_deployed["bag"] == False:
+						self.pub_mission_status.publish("DEPLOYING TRACKER")
 						rospy.loginfo("Deploying tracker payload...")
 						self.pub_tracker.publish(Bool(True))
 						self.payloads_deployed["bag"] = True
@@ -819,8 +836,10 @@ class autopilot():
 					self.sub_landing_marker = rospy.Subscriber(f"/marker_locations/id/{self.LANDING_ARUCO_ID}", PointStamped, self.callback_inspect_roi, callback_args=True)
 
 			elif (self.spar_client.get_state() == GoalStatus.PREEMPTED) or (self.spar_client.get_state() == GoalStatus.ABORTED) or (self.spar_client.get_state() == GoalStatus.REJECTED):
+				self.pub_mission_status.publish("CANCELLED")
 				rospy.loginfo("Mission cancelled!")
 				rospy.signal_shutdown("cancelled")
+
 	def _clamp(self, v, vmin, vmax):
 		return max(vmin, min(v, vmax))
 
@@ -1051,6 +1070,7 @@ def path_planner_xyleft(
 def main(args):
 	# Initialise ROS
 	rospy.init_node('autopilot')
+	pub_mission_status = rospy.Publisher("/mission/status", String, queue_size=10)
 
 	# Load config
 	print(os.getcwd())
@@ -1062,6 +1082,7 @@ def main(args):
 
 	# List of waypoints
 	# [X, Y, Z, Yaw]
+	pub_mission_status.publish("PLANNING FLIGHT PATH")
 	wps = path_planner_xyleft(
 			Xmin=X_MIN + 0.1, Xmax=X_MAX - 0.1,
 			Ymin=Y_MIN + 0.1, Ymax=Y_MAX - 0.1,
@@ -1097,7 +1118,7 @@ def main(args):
 	# 	]
 
 	# Create our Autopilot class option
-	pilot = autopilot(waypoints_list, config)
+	pilot = autopilot(waypoints_list, config, pub_mission_status)
 
 	# rospy.spin() keeps the program running once setup is done.
 	# Without it, the script would exit immediately after starting.
