@@ -8,6 +8,7 @@ import os
 from math import *
 import json
 import numpy as np
+import datetime
 
 import rospy
 # rospy = ROS 1's Python client library (allows this script to act as a ROS node,
@@ -68,6 +69,9 @@ from nav_msgs.msg import OccupancyGrid
 
 # For battery monitoring
 from sensor_msgs.msg import BatteryState
+
+# For marker identification
+from std_msgs.msg import Float32MultiArray
 
 import yaml
 #----------------------------------------------------------------------------------------------------------------------------------------------------------------
@@ -183,10 +187,15 @@ class autopilot():
 			self.sub_grid = rospy.Subscriber("/grid", OccupancyGrid, self._cb_grid, queue_size=1)
 
 			# Subscriber to catch "ROI" diversion commands
-			# self.sub_roi = rospy.Subscriber("~roi", PointStamped, self.callback_inspect_roi)
+			# Critical targets
 			self.sub_roi_person = rospy.Subscriber(f"/marker_locations/id/person", PointStamped, self.callback_inspect_roi, callback_args=False)
 			self.sub_roi_bag = rospy.Subscriber(f"/marker_locations/id/bag", PointStamped, self.callback_inspect_roi, callback_args=False)
 			self.sub_landing_marker = None
+
+			# Other targets
+			self.seen = set()
+			self.other_marker_locations = {}
+			self.sub_roi_marker = rospy.Subscriber("/marker_locations", Float32MultiArray, self.callback_record_marker, queue_size=10)
 
 			# Create a ROS publisher to send messages to the '/payload/{PAYLOAD_TYPE}/set' topic.
 			self.pub_epipen = rospy.Publisher("/payload/epipen/set", Bool, queue_size=10)
@@ -333,6 +342,27 @@ class autopilot():
 		# Keep current yaw up to date
 		self.current_yaw = self._quat_to_yaw(msg_in.pose.orientation)
 		self.have_pose = True
+
+
+	def callback_record_marker(self, msg_in: Float32MultiArray):
+		data = msg_in.data or []
+		if len(data) < 3:
+			rospy.logwarn_throttle(5.0, "Float32MultiArray too short (<3)")
+			return
+
+		# record first-ever sighting per ID, ignore later updates
+		for x, y, tid in self.iter_triples(data):
+			if tid in self.seen:
+				continue
+			self.seen.add(tid)
+			if tid not in self.other_marker_locations:
+				self.other_marker_locations[tid] = {"x": x, "y": y, "z": 0.0}
+
+
+	def iter_triples(self, data):
+		n = len(data)
+		for i in range(0, n - 2, 3):
+			yield float(data[i]), float(data[i+1]), int(round(data[i+2]))
 
 
 	# This function will fire whenever a ROI pose message is sent
@@ -598,7 +628,29 @@ class autopilot():
 		self.pub_mission_status.publish("LANDING")
 		self.send_land_motion()
 		rospy.loginfo("ROI landing complete; shutting down.")
+
+		rospy.loginfo("CRITICAL ROI:")
 		rospy.loginfo(json.dumps(self.visited_rois, indent=4))
+		rospy.loginfo("NON-CRITICAL ROI:")
+		rospy.loginfo(json.dumps(self.other_marker_locations, indent=4))
+
+		try:
+			all_data = self.visited_rois | self.other_marker_locations
+
+			# Build output path: ~/catkin_ws/flight_YYYYMMDD_HHMMSS_rois.json
+			base_dir = os.path.join(os.path.expanduser("~"), "catkin_ws")
+			os.makedirs(base_dir, exist_ok=True)
+			ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+			out_path = os.path.join(base_dir, f"flight_{ts}_rois.json")
+
+			with open(out_path, "w") as f:
+				json.dump(all_data, f, indent=4, sort_keys=True)
+
+			rospy.loginfo(f"[LAND] Saved ROI summary to: {out_path}")
+
+		except Exception as e:
+			rospy.logerr(f"[LAND] Failed to save ROI summary: {e}")
+		
 		rospy.signal_shutdown("complete")
 
 
