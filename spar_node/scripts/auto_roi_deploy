@@ -48,30 +48,24 @@ from actionlib_msgs.msg import GoalStatus
 from geometry_msgs.msg import Point, PointStamped, PoseStamped
 
 # For deploying payload
-from std_msgs.msg import Bool
+from std_msgs.msg import Bool, String, Float32, Float32MultiArray
 
 # Import the SPAR flight motion action interface:
 # - FlightMotionAction = the *action wrapper* (bundles goal, result, and feedback types so actionlib can manage them as one action).
 # - FlightMotionGoal   = the goal message you fill in with motion parameters (type, position, yaw, speeds, convergence) and send to the action server (Spar_Node).
 from spar_msgs.msg import FlightMotionAction, FlightMotionGoal
 
-from std_msgs.msg import Float32
 # so we can publish the waypoint progress
 
 from tf.transformations import euler_from_quaternion
 # So we can compute Yaw from quaternion
 
 # A* Path Planning
-from breadcrumb.srv import RequestPath
-from breadcrumb.srv import RequestPathRequest
-from nav_msgs.msg import Path
-from nav_msgs.msg import OccupancyGrid
+from breadcrumb.srv import RequestPath, RequestPathRequest
+from nav_msgs.msg import Path, OccupancyGrid
 
 # For battery monitoring
 from sensor_msgs.msg import BatteryState
-
-# For marker identification
-from std_msgs.msg import Float32MultiArray
 
 import yaml
 #----------------------------------------------------------------------------------------------------------------------------------------------------------------
