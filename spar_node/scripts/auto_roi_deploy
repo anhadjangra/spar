@@ -105,6 +105,7 @@ class autopilot():
 		# during the roi diversion and taking over our flight!
 		self.performing_roi = False
 		self.performing_emergency = False
+		self.landed = False
 
 		# Save the input waypoints
 		self.waypoints = waypoints
@@ -171,7 +172,7 @@ class autopilot():
 								 PoseStamped,
 								 self.callback_pose)
 
-			self.sub_battery = rospy.Subscriber(f"/mavros/battery", BatteryState, self.callback_battery_monitor, callback_args=False)
+			self.sub_battery = rospy.Subscriber(f"/mavros/battery", BatteryState, self.callback_battery_monitor)
 
 			# --- Occupancy Grid (for snapping waypoints out of obstacles)
 			self.grid = None
@@ -518,7 +519,7 @@ class autopilot():
 	def callback_battery_monitor(self, msg_in: BatteryState):
 		try:
 			pct = float(msg_in.percentage)
-			if pct > 0 and pct < 0.20: # when battery drops below under 20%
+			if pct > 0 and pct < 0.20 and not self.landed: # when battery drops below under 20%
 				rospy.logwarn_throttle_identical(5, f"Critical Low Battery: {pct*100:.1f}%")
 				rospy.logwarn_throttle_identical(5, f"Commencing emergency landing...")
 
@@ -620,32 +621,36 @@ class autopilot():
 
 	def land(self):
 		self.pub_mission_status.publish("LANDING")
-		self.send_land_motion()
-		rospy.loginfo("ROI landing complete; shutting down.")
+		if self.send_land_motion():
+			rospy.loginfo("ROI landing complete; shutting down.")
 
-		rospy.loginfo("CRITICAL ROI:")
-		rospy.loginfo(json.dumps(self.visited_rois, indent=4))
-		rospy.loginfo("NON-CRITICAL ROI:")
-		rospy.loginfo(json.dumps(self.other_marker_locations, indent=4))
+			rospy.loginfo("CRITICAL ROI:")
+			rospy.loginfo(json.dumps(self.visited_rois, indent=4))
+			rospy.loginfo("NON-CRITICAL ROI:")
+			rospy.loginfo(json.dumps(self.other_marker_locations, indent=4))
 
-		try:
-			all_data = self.visited_rois | self.other_marker_locations
+			try:
+				all_data = self.visited_rois | self.other_marker_locations
 
-			# Build output path: ~/catkin_ws/flight_YYYYMMDD_HHMMSS_rois.json
-			base_dir = os.path.join(os.path.expanduser("~"), "catkin_ws")
-			os.makedirs(base_dir, exist_ok=True)
-			ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-			out_path = os.path.join(base_dir, f"flight_{ts}_rois.json")
+				# Build output path: ~/catkin_ws/flight_YYYYMMDD_HHMMSS_rois.json
+				base_dir = os.path.join(os.path.expanduser("~"), "catkin_ws")
+				os.makedirs(base_dir, exist_ok=True)
+				ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+				out_path = os.path.join(base_dir, f"flight_{ts}_rois.json")
 
-			with open(out_path, "w") as f:
-				json.dump(all_data, f, indent=4, sort_keys=True)
+				with open(out_path, "w") as f:
+					json.dump(all_data, f, indent=4, sort_keys=True)
 
-			rospy.loginfo(f"[LAND] Saved ROI summary to: {out_path}")
+				rospy.loginfo(f"[LAND] Saved ROI summary to: {out_path}")
 
-		except Exception as e:
-			rospy.logerr(f"[LAND] Failed to save ROI summary: {e}")
-		
-		rospy.signal_shutdown("complete")
+			except Exception as e:
+				rospy.logerr(f"[LAND] Failed to save ROI summary: {e}")
+			
+			self.landed = True
+			rospy.signal_shutdown("complete")
+			sys.exit()
+		else:
+			rospy.logerr("LANDING FAILED")
 
 
 	# This function is for convinience to simply send out a new waypoint
@@ -772,7 +777,7 @@ class autopilot():
 	def check_waypoint_status(self, te):
 		# If we're performing the ROI diversion, then don't do
 		# anything here, as this is handled in that function
-		if not self.performing_roi or not self.performing_emergency:
+		if not self.performing_roi and not self.performing_emergency and not self.landed:
 			# If the last segment has succeeded.
 			# For more complex tasks, it might be necessary to also
 			# check if you are in waypoint or diversion mode here.
