@@ -140,7 +140,7 @@ class autopilot():
 		self.loiter_time  = rospy.get_param("~loiter_time", 5.0)   # how long to Loiter above ROI
 
 		# Record dict of visited ROIs
-		self.visited_rois = set()
+		self.visited_rois = {}
 
 		self.payloads_deployed = {"person": False, "bag": False}
 
@@ -157,12 +157,12 @@ class autopilot():
 
 		# Wait until the action server is online before continuing.
 		# Prevents us from trying to send goals before the server is ready.
-		rospy.loginfo("Waiting for spar...")
+		rospy.loginfo("[INIT] Waiting for spar...")
 		self.spar_client.wait_for_server()
 
 		if not rospy.is_shutdown():
 			# Good to go, start mission
-			rospy.loginfo("Starting waypoint mission")
+			rospy.loginfo("[INIT] Starting waypoint mission")
 
 			# Subscriptions first, so we already have pose during/after takeoff
 			# Callback to save "current location" such that we can perform and return
@@ -189,7 +189,7 @@ class autopilot():
 
 			# Other targets
 			self.seen = set()
-			self.other_marker_locations = {}
+			self.other_marker_locations = set()
 			self.sub_roi_marker = rospy.Subscriber("/marker_locations", Float32MultiArray, self.callback_record_marker, queue_size=10)
 
 			# Create a ROS publisher to send messages to the '/payload/{PAYLOAD_TYPE}/set' topic.
@@ -224,18 +224,18 @@ class autopilot():
 
 		# Make sure waypoints are a list
 		if not isinstance(wps, list):
-			rospy.logwarn("Waypoints are not list")
+			rospy.logwarn("[CHKWPS] Waypoints are not list")
 			return False
 
 		# Make sure we have at least one waypoint
 		if len(wps) < 1:
-			rospy.logwarn("Waypoints list is empty")
+			rospy.logwarn("[CHKWPS] Waypoints list is empty")
 			return False
 
 		# Check each of our waypoints
 		for i in range(len(wps)):
 			if not self.check_waypoint(wps[i]):
-				rospy.logwarn("Waypoint %i did not pass check" % (i + 1))
+				rospy.logwarn("[CHKWPS] Waypoint %i did not pass check" % (i + 1))
 				return False
 
 		# If we haven't returned false yet, then waypoints look good!
@@ -246,22 +246,22 @@ class autopilot():
 	def check_waypoint(self, wp):
 		# Make sure each waypoint is a list
 		if not isinstance(wp, list):
-			rospy.logwarn("Waypoint is not a list of coordinates")
+			rospy.logwarn("[CHKWP] Waypoint is not a list of coordinates")
 			return False
 		# Make sure each waypoint has 4 values
 		if len(wp) != 4:
-			rospy.logwarn("Waypoint has an invalid length (must be X/Y/Z/Yaw)")
+			rospy.logwarn("[CHKWP] Waypoint has an invalid length (must be X/Y/Z/Yaw)")
 			return False
 		# Make sure waypoint is within mission zone
 		x, y, z, yaw = wp
 		if x > X_MAX or x < X_MIN:
-			rospy.logwarn("Waypoint x=%.2f outside [-3.8, 3.8]" % x)
+			rospy.logwarn("[CHKWP] Waypoint x=%.2f outside [-3.8, 3.8]" % x)
 			return False
 		if y > Y_MAX or y < Y_MIN:
-			rospy.logwarn("Waypoint y=%.2f outside [-2.5, 2.0]" % y)
+			rospy.logwarn("[CHKWP] Waypoint y=%.2f outside [-2.5, 2.0]" % y)
 			return False
 		if z > Z_MAX or z < Z_MIN:
-			rospy.logwarn("Waypoint z=%.2f outside [0, 0.5]" % z)
+			rospy.logwarn("[CHKWP] Waypoint z=%.2f outside [0, 0.5]" % z)
 			return False
 
 		# If we haven't returned false yet, then waypoint looks valid!
@@ -281,8 +281,9 @@ class autopilot():
 			self.sub_roi_bag.unregister()
 		self.spar_client.cancel_goal()
 
-		rospy.loginfo("Autopilot stopped")
+		rospy.loginfo("[SHUTDOWN] Autopilot stopped")
 		self.pub_mission_status.publish("MISSION COMPLETE")
+		sys.exit()
 
 	def _run_breadcrumb_segment(self, start_xyz, end_xyz, yaw_for_segment):
 		"""
@@ -309,7 +310,7 @@ class autopilot():
 			
 			# Loop through the solution returned from breadcrumb
 			for i in range(len(res.path.poses)):
-				rospy.loginfo(" [%0.2f;%0.2f;%0.2f]", res.path.poses[i].position.x, res.path.poses[i].position.y, res.path.poses[i].position.z)
+				rospy.loginfo("[BC]  [%0.2f;%0.2f;%0.2f]", res.path.poses[i].position.x, res.path.poses[i].position.y, res.path.poses[i].position.z)
 				breadcrumbWPS.append([res.path.poses[i].position.x, res.path.poses[i].position.y, res.path.poses[i].position.z, 0.0])
 				
 			# Display the path
@@ -342,7 +343,7 @@ class autopilot():
 	def callback_record_marker(self, msg_in: Float32MultiArray):
 		data = msg_in.data or []
 		if len(data) < 3:
-			rospy.logwarn_throttle(5.0, "Float32MultiArray too short (<3)")
+			rospy.logwarn_throttle(5.0, "[MARKER] Float32MultiArray too short (<3)")
 			return
 
 		# record first-ever sighting per ID, ignore later updates
@@ -369,7 +370,7 @@ class autopilot():
 
 		# Extract the "id" from the topic (last part of the path)
 		roi_id = topic.split("/")[-1]  # will be "person" or "bag"
-		rospy.loginfo_throttle_identical(5, f"ROI diversion triggered for id: {roi_id}")
+		rospy.loginfo_throttle_identical(5, f"[ROI] ROI diversion triggered for id: {roi_id}")
 
 		# Record our current location so we can return to it later
 		start_x = float(self.current_location.x)
@@ -391,36 +392,36 @@ class autopilot():
 						raw_dwp[0], raw_dwp[1], dwp[0], dwp[1])
 
 		if not self.check_waypoint(dwp):
-			rospy.logwarn_throttle_identical(2, "Bad ROI waypoint, outside of safe flight zone!\nCancelling diversion...")
+			rospy.logwarn_throttle_identical(2, "[ROI] Bad ROI waypoint, outside of safe flight zone!\nCancelling diversion...")
 			return
 
 		# If we’re already diverting, ignore further ROI requests
 		if self.performing_roi:
-			rospy.logwarn_throttle_identical(2, "ROI request ignored: diversion already in progress.")
+			rospy.logwarn_throttle_identical(2, "[ROI] ROI request ignored: diversion already in progress.")
 			return
 
 		# We need a current pose to be able to return safely
 		if not self.have_pose:
-			rospy.logwarn_throttle_identical(2, "No current pose yet; cannot divert to ROI.")
+			rospy.logwarn_throttle_identical(2, "[ROI] No current pose yet; cannot divert to ROI.")
 			return
 
 		if roi_id in self.visited_rois:
 			if self.visited_rois[roi_id]["repositioning_status"] == "completed":
-				rospy.loginfo_throttle_identical(2, "Already visited ROI=%s, cancelling diversion...", roi_id)
+				rospy.loginfo_throttle_identical(2, "[ROI] Already visited ROI=%s, cancelling diversion...", roi_id)
 				return
 
 		# Set our flag that we are performing the diversion and cancel active goal
 		self.performing_roi = True
 
 		if not "repositioning_status" in self.visited_rois.get(roi_id, {}):
-			rospy.loginfo_throttle_identical(5, "Registering new ROI")
+			rospy.loginfo_throttle_identical(5, "[ROI] Registering new ROI")
 			# Set the "return waypoint" (at yaw zero)
 			self.visited_rois[roi_id] = {"rwp": [start_x, start_y, start_z, current_yaw], "repositioning_status": "required"}
 
-			rospy.loginfo("Starting diversion to ROI...")
+			rospy.loginfo("[ROI] Starting diversion to ROI...")
 			self.pub_mission_status.publish("DIVERTING")
 		else:
-			rospy.loginfo_throttle_identical(5, "Repositioning above ROI...")
+			rospy.loginfo_throttle_identical(5, "[ROI] Repositioning above ROI...")
 			self.visited_rois[roi_id]["repositioning_status"] = "repositioning"
 			self.pub_mission_status.publish("REPOSITIOING")
 
@@ -442,7 +443,7 @@ class autopilot():
 				rospy.signal_shutdown("cancelled")
 				return
 
-		rospy.loginfo("Reached diversion ROI!")
+		rospy.loginfo("[ROI] Reached diversion ROI!")
 
 		# Repositioning logic
 		if self.visited_rois[roi_id]["repositioning_status"] == "required":
@@ -457,35 +458,35 @@ class autopilot():
 		# Loiter above ROI
 		if self.loiter_time > 0.0:
 			self.pub_mission_status.publish("STABILISING")
-			rospy.loginfo("Hovering over ROI for %.1f s", self.loiter_time)
+			rospy.loginfo("[ROI] Hovering over ROI for %.1f s", self.loiter_time)
 			rospy.sleep(rospy.Duration(self.loiter_time))
 
 		# !!!: Change this to modify behaviour at ROIs
 		if not landing: # deployment roi
 			if roi_id == "person":
 				self.pub_mission_status.publish("DEPLOYING EPIPEN")
-				rospy.loginfo("Hovering over person...")
-				rospy.loginfo("Deploying epipen payload...")
+				rospy.loginfo("[ROI] Hovering over person...")
+				rospy.loginfo("[ROI] Deploying epipen payload...")
 				self.pub_epipen.publish(Bool(True))
 				self.payloads_deployed["person"] = True
-				rospy.loginfo("Hovering for 2 seconds...")
+				rospy.loginfo("[ROI] Hovering for 2 seconds...")
 				rospy.sleep(rospy.Duration(2))
 			elif roi_id == "bag":
 				self.pub_mission_status.publish("DEPLOYING TRACKER")
-				rospy.loginfo("Hovering over bag...")
-				rospy.loginfo("Deploying tracker payload...")
+				rospy.loginfo("[ROI] Hovering over bag...")
+				rospy.loginfo("[ROI] Deploying tracker payload...")
 				self.pub_tracker.publish(Bool(True))
 				self.payloads_deployed["bag"] = True
-				rospy.loginfo("Hovering for 2 seconds...")
+				rospy.loginfo("[ROI] Hovering for 2 seconds...")
 				rospy.sleep(rospy.Duration(2))
 			else:
-				rospy.loginfo("Hovering over ROI...")
+				rospy.loginfo("[ROI] Hovering over ROI...")
 				rospy.sleep(rospy.Duration(self.loiter_time))
 
 		# Land if landing flag true
 		if landing:
 			# Land at ROI
-			rospy.loginfo("Setting down at ROI")
+			rospy.loginfo("[ROI] Setting down at ROI")
 			try:
 				self.land()
 			except e:
@@ -493,7 +494,7 @@ class autopilot():
 				self.performing_roi = False
 				return
 
-		rospy.loginfo("Returning to pre-diversion position...")
+		rospy.loginfo("[ROI] Returning to pre-diversion position...")
 		self.pub_mission_status.publish("RETURNING")
 		rwp = self.visited_rois[roi_id]["rwp"]
 		start_xyz = (float(self.current_location.x), float(self.current_location.y), float(self.current_location.z))
@@ -509,7 +510,7 @@ class autopilot():
 
 		# "waypoint_counter" represents the "next waypoint"
 		# "waypoint_counter - 1" represents the "current waypoint"
-		rospy.loginfo("Resuming flight plan from waypoint %i!" % (self.waypoint_counter - 1))
+		rospy.loginfo("[ROI] Resuming flight plan from waypoint %i!" % (self.waypoint_counter - 1))
 		self.send_wp(self.waypoints[self.waypoint_counter - 1])
 		# Unset our flag that we are performing a diversion
 		# to allow the waypoint timer to take back over
@@ -519,24 +520,25 @@ class autopilot():
 	def callback_battery_monitor(self, msg_in: BatteryState):
 		try:
 			pct = float(msg_in.percentage)
-			if pct > 0 and pct < 0.20 and not self.landed: # when battery drops below under 20%
-				rospy.logwarn_throttle_identical(5, f"Critical Low Battery: {pct*100:.1f}%")
-				rospy.logwarn_throttle_identical(5, f"Commencing emergency landing...")
+			if pct > 0 and pct < 0.20 and not self.performing_emergency and not self.landed: # when battery drops below under 20%
+				rospy.logwarn_throttle_identical(5, f"[BATT] Critical Low Battery: {pct*100:.1f}%")
+				rospy.logwarn_throttle_identical(5, f"[BATT] Commencing emergency landing...")
 
 				# Stop any ROI diversion, cancel guidance, and land safely
 				try:
-					self.performing_roi = False
-					self.performing_emergency = True
 					self.spar_client.cancel_goal()
 				except Exception:
 					pass
+
+				self.performing_roi = False
+				self.performing_emergency = True
 
 				self.pub_mission_status.publish("LOW BATTERY")
 				# Attempt emergency landing (try ARUCO latch, else fallback to launch)
 				self.emergency_land()
 
 		except Exception as e:
-			rospy.logwarn_throttle_identical(5, f"Battery percentage read error: {e}")
+			rospy.logwarn_throttle_identical(5, f"[BATT] Battery percentage read error: {e}")
 			return
 
 	def emergency_land(self):
@@ -545,12 +547,12 @@ class autopilot():
 		2) Else land at predefined safe point.
 		"""
 		if not self.have_pose:
-			rospy.logwarn_throttle_identical(3, "No current pose; attempting straight LAND.")
+			rospy.logwarn_throttle_identical(3, "[EMERG] No current pose; attempting straight LAND.")
 			try:
-				rospy.loginfo("Emergency LAND command issued without pose.")
+				rospy.loginfo("[EMERG] Emergency LAND command issued without pose.")
 				self.land()
 			except Exception as e:
-				rospy.logerr(f"Emergency LAND failed: {e}")
+				rospy.logerr(f"[EMERG] Emergency LAND failed: {e}")
 			return
 
 		wait_timeout = 3.0 # seconds to wait for latched ARUCO
@@ -624,10 +626,13 @@ class autopilot():
 		if self.send_land_motion():
 			rospy.loginfo("ROI landing complete; shutting down.")
 
-			rospy.loginfo("CRITICAL ROI:")
-			rospy.loginfo(json.dumps(self.visited_rois, indent=4))
-			rospy.loginfo("NON-CRITICAL ROI:")
-			rospy.loginfo(json.dumps(self.other_marker_locations, indent=4))
+			try:
+				rospy.loginfo("CRITICAL ROI:")
+				rospy.loginfo(json.dumps(self.visited_rois, indent=4))
+				rospy.loginfo("NON-CRITICAL ROI:")
+				rospy.loginfo(json.dumps(self.other_marker_locations, indent=4))
+			except Exception as e:
+				rospy.logerr(f"[LAND] No data recorded: {e}")
 
 			try:
 				all_data = self.visited_rois | self.other_marker_locations
@@ -648,9 +653,8 @@ class autopilot():
 			
 			self.landed = True
 			rospy.signal_shutdown("complete")
-			sys.exit()
 		else:
-			rospy.logerr("LANDING FAILED")
+			rospy.logerr("[LAND] LANDING FAILED")
 
 
 	# This function is for convinience to simply send out a new waypoint
@@ -716,7 +720,7 @@ class autopilot():
 		goal.position_radius = rospy.get_param("~position_radius", 0.1)  # m
 		goal.yaw_range       = rospy.get_param("~yaw_range",       0.1)  # rad
 
-		rospy.loginfo("Takeoff: target z=%.2f m, vz=%.2f m/s", height, speed)
+		rospy.loginfo("[TKOFF] Takeoff: target z=%.2f m, vz=%.2f m/s", height, speed)
 		self.spar_client.send_goal(goal)
 
 		# Cancel safely if the node is stopped mid-takeoff
@@ -726,10 +730,10 @@ class autopilot():
 		st = self.spar_client.get_state()
 
 		if st == GoalStatus.SUCCEEDED:
-			rospy.loginfo("Takeoff complete.")
+			rospy.loginfo("[TKOFF] Takeoff complete.")
 		else:
 			# Mirror your existing status handling
-			rospy.logerr("Takeoff failed (state=%d). Aborting mission.", st)
+			rospy.logerr("[TKOFF] Takeoff failed (state=%d). Aborting mission.", st)
 			rospy.signal_shutdown("takeoff_failed")
 
 	def send_land_motion(self, speed=None):
@@ -745,30 +749,30 @@ class autopilot():
 			speed = rospy.get_param("~land_speed", rospy.get_param("~speed", 0.2))
 		goal.velocity_vertical = float(speed)  # SPAR ignores other velocities for land
 
-		rospy.loginfo("Landing...")
+		rospy.loginfo("[LAND] Landing...")
 		self.spar_client.send_goal(goal)
 		rospy.on_shutdown(self.spar_client.cancel_goal)
 		self.spar_client.wait_for_result()
 
 		st = self.spar_client.get_state()
 		if st == GoalStatus.SUCCEEDED:
-			rospy.loginfo("Landing complete!")
+			rospy.loginfo("[LAND] Landing complete!")
 			return True
 
 		# Detailed feedback (optional)
-		rospy.logerr("Landing failed (state=%d).", st)
+		rospy.logerr("[LAND] Landing failed (state=%d).", st)
 		if st in (GoalStatus.PENDING, GoalStatus.ACTIVE):
-			rospy.loginfo("Sent command to cancel current mission")
+			rospy.loginfo("[LAND] Sent command to cancel current mission")
 		elif st == GoalStatus.PREEMPTED:
-			rospy.logwarn("The current mission was cancelled")
+			rospy.logwarn("[LAND] The current mission was cancelled")
 		elif st == GoalStatus.ABORTED:
-			rospy.logwarn("The current mission was aborted")
+			rospy.logwarn("[LAND] The current mission was aborted")
 		elif st == GoalStatus.RECALLED:
-			rospy.logerr("Error: The current mission was recalled")
+			rospy.logerr("[LAND] Error: The current mission was recalled")
 		elif st == GoalStatus.REJECTED:
-			rospy.logerr("Error: The current mission was rejected")
+			rospy.logerr("[LAND] Error: The current mission was rejected")
 		else:
-			rospy.logerr("Error: Unknown goal status")
+			rospy.logerr("[LAND] Error: Unknown goal status")
 		return False
 
 	# This function will fire whenever we recieve a timer event (te) from rospy.Timer()
@@ -785,7 +789,7 @@ class autopilot():
 			#		(such as aborted), as there are some states
 			#		where we won't recover from, and should just exit
 			if self.spar_client.get_state() == GoalStatus.SUCCEEDED:
-				rospy.loginfo_throttle_identical(5, "Reached waypoint %i!" % (self.waypoint_counter))
+				rospy.loginfo_throttle_identical(5, "[WPSTAT] Reached waypoint %i!" % (self.waypoint_counter))
 
 				# XXX:	Another check could go here to finish the mission early
 				#		if "all" inspection tasks have been completed
@@ -805,9 +809,9 @@ class autopilot():
 						s_end   = self.snap_wp_in_mission([ex, ey, ez, 0.0])
 
 						if (s_start[0], s_start[1]) != (sx, sy):
-							rospy.logwarn("Segment start snapped (%.2f, %.2f) -> (%.2f, %.2f)", sx, sy, s_start[0], s_start[1])
+							rospy.logwarn("[WPSTAT] Segment start snapped (%.2f, %.2f) -> (%.2f, %.2f)", sx, sy, s_start[0], s_start[1])
 						if (s_end[0], s_end[1]) != (ex, ey):
-							rospy.logwarn("Segment end snapped (%.2f, %.2f) -> (%.2f, %.2f)", ex, ey, s_end[0], s_end[1])
+							rospy.logwarn("[WPSTAT] Segment end snapped (%.2f, %.2f) -> (%.2f, %.2f)", ex, ey, s_end[0], s_end[1])
 
 						req = RequestPathRequest()
 						req.start.x, req.start.y, req.start.z = s_start[0], s_start[1], s_start[2]
@@ -822,12 +826,12 @@ class autopilot():
 						
 						if len(res.path.poses) > 0:
 							# Print the path to the screen
-							rospy.loginfo("Segment {} to {}:".format(self.waypoint_counter - 1,self.waypoint_counter))
-							rospy.loginfo("[%0.2f;%0.2f;%0.2f] => [%0.2f;%0.2f;%0.2f]", req.start.x,req.start.y,req.start.z, req.end.x,req.end.y,req.end.z)
+							rospy.loginfo("[WPSTAT] Segment {} to {}:".format(self.waypoint_counter - 1,self.waypoint_counter))
+							rospy.loginfo("[WPSTAT] [%0.2f;%0.2f;%0.2f] => [%0.2f;%0.2f;%0.2f]", req.start.x,req.start.y,req.start.z, req.end.x,req.end.y,req.end.z)
 							
 							# Loop through the solution returned from breadcrumb
 							for i in range(len(res.path.poses)):
-								rospy.loginfo(" [%0.2f;%0.2f;%0.2f]", res.path.poses[i].position.x, res.path.poses[i].position.y, res.path.poses[i].position.z)
+								rospy.loginfo("[WPSTAT]  [%0.2f;%0.2f;%0.2f]", res.path.poses[i].position.x, res.path.poses[i].position.y, res.path.poses[i].position.z)
 								breadcrumbWPS.append([res.path.poses[i].position.x, res.path.poses[i].position.y, res.path.poses[i].position.z, 0.0])
 								
 							# Display the path
@@ -839,7 +843,7 @@ class autopilot():
 							self.send_wp(self.breadcrumbWPS[self.breadcrumbWPSnextIndex])
 							self.breadcrumbWPSnextIndex +=1
 						else:
-							rospy.logerr_throttle_identical(5, "breadcrumb solution not found, falling back to original path")
+							rospy.logerr_throttle_identical(5, "[WPSTAT] breadcrumb solution not found, falling back to original path")
 							self.send_wp(self.waypoints[self.waypoint_counter])
 							self.waypoint_counter += 1
 
@@ -854,7 +858,7 @@ class autopilot():
 							# Calculate fraction of mission complete (waypoints done / total)
 							progress = float(self.waypoint_counter) / float(len(self.waypoints))
 							self.pub_progress.publish(progress)
-							rospy.loginfo("Mission progress: %.0f%%" % (progress * 100.0))
+							rospy.loginfo("[WPSTAT] Mission progress: %.0f%%" % (progress * 100.0))
 							
 							# If we finish with the breadcrumb waypoints we increase normal waypoints
 							self.waypoint_counter += 1
@@ -864,31 +868,31 @@ class autopilot():
 					# Else the mission is over, shutdown and quit the node
 					# XXX:	This could be used to restart the mission back to the
 					#		first waypoint instead to restart the mission
-					rospy.loginfo_throttle_identical(5, "Search complete! Checking payloads deployed...")
+					rospy.loginfo_throttle_identical(5, "[WPSTAT] Search complete! Checking payloads deployed...")
 					self.pub_mission_status.publish("SEARCH COMPLETE")
 
 					if self.payloads_deployed["person"] == False:
 						self.pub_mission_status.publish("DEPLOYING EPIPEN")
-						rospy.loginfo("Deploying epipen payload...")
+						rospy.loginfo("[WPSTAT] Deploying epipen payload...")
 						self.pub_epipen.publish(Bool(True))
 						self.payloads_deployed["person"] = True
-						rospy.loginfo("Hovering for 2 seconds...")
+						rospy.loginfo("[WPSTAT] Hovering for 2 seconds...")
 						rospy.sleep(rospy.Duration(2))
 
 					if self.payloads_deployed["bag"] == False:
 						self.pub_mission_status.publish("DEPLOYING TRACKER")
-						rospy.loginfo("Deploying tracker payload...")
+						rospy.loginfo("[WPSTAT] Deploying tracker payload...")
 						self.pub_tracker.publish(Bool(True))
 						self.payloads_deployed["bag"] = True
-						rospy.loginfo("Hovering for 2 seconds...")
+						rospy.loginfo("[WPSTAT] Hovering for 2 seconds...")
 						rospy.sleep(rospy.Duration(2))
 
-					rospy.loginfo_throttle_identical(5, "Mission complete! Landing...")
+					rospy.loginfo_throttle_identical(5, "[WPSTAT] Attempting landing...")
 					self.sub_landing_marker = rospy.Subscriber(f"/marker_locations/id/{self.LANDING_ARUCO_ID}", PointStamped, self.callback_inspect_roi, callback_args=True)
 
 			elif (self.spar_client.get_state() == GoalStatus.PREEMPTED) or (self.spar_client.get_state() == GoalStatus.ABORTED) or (self.spar_client.get_state() == GoalStatus.REJECTED):
 				self.pub_mission_status.publish("CANCELLED")
-				rospy.loginfo("Mission cancelled!")
+				rospy.loginfo("[WPSTAT] Mission cancelled!")
 				rospy.signal_shutdown("cancelled")
 
 	def _clamp(self, v, vmin, vmax):
@@ -989,7 +993,7 @@ class autopilot():
 
 	# Display a path
 	def display_path(self, wps, name):
-		rospy.loginfo("Displaying path...")
+		rospy.loginfo("[DISP] Displaying path...")
 		pub_path = rospy.Publisher(name, Path, queue_size=10, latch=True)
 		msg = Path()
 		msg.header.frame_id = "/map"
@@ -1007,7 +1011,7 @@ class autopilot():
 			pose.pose.orientation.z = 0.0
 	
 			msg.poses.append(pose)
-		rospy.loginfo("Publishing path...")
+		rospy.loginfo("[DISP] Publishing path...")
 		pub_path.publish(msg)
 
 	def _quat_to_yaw(self, q):
