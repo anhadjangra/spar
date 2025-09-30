@@ -183,13 +183,13 @@ class autopilot():
 
 			# Subscriber to catch "ROI" diversion commands
 			# Critical targets
-			self.sub_roi_person = rospy.Subscriber(f"/marker_locations/id/person", PointStamped, self.callback_inspect_roi, callback_args=False)
-			self.sub_roi_bag = rospy.Subscriber(f"/marker_locations/id/bag", PointStamped, self.callback_inspect_roi, callback_args=False)
+			self.sub_roi_person = rospy.Subscriber(f"/marker_locations/id/person", PointStamped, self.callback_inspect_roi, queue_size=1, callback_args=False)
+			self.sub_roi_bag = rospy.Subscriber(f"/marker_locations/id/bag", PointStamped, self.callback_inspect_roi, queue_size=1, callback_args=False)
 			self.sub_landing_marker = None
 
 			# Other targets
 			self.seen = set()
-			self.other_marker_locations = set()
+			self.other_marker_locations = {}
 			self.sub_roi_marker = rospy.Subscriber("/marker_locations", Float32MultiArray, self.callback_record_marker, queue_size=10)
 
 			# Create a ROS publisher to send messages to the '/payload/{PAYLOAD_TYPE}/set' topic.
@@ -635,16 +635,18 @@ class autopilot():
 				rospy.logerr(f"[LAND] No data recorded: {e}")
 
 			try:
-				all_data = self.visited_rois | self.other_marker_locations
+				stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+				outdir = os.path.join(os.getcwd(), "catkin_ws")
+				os.makedirs(outdir, exist_ok=True)
+				path = os.path.join(outdir, f"flight_{stamp}_rois.json")
 
-				# Build output path: ~/catkin_ws/flight_YYYYMMDD_HHMMSS_rois.json
-				base_dir = os.path.join(os.path.expanduser("~"), "catkin_ws")
-				os.makedirs(base_dir, exist_ok=True)
-				ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-				out_path = os.path.join(base_dir, f"flight_{ts}_rois.json")
-
-				with open(out_path, "w") as f:
-					json.dump(all_data, f, indent=4, sort_keys=True)
+				summary = {
+					"flight_timestamp": stamp,
+					"critical_roi": self.visited_rois,
+					"non_critical_roi": self.other_marker_locations
+				}
+				with open(path, "w") as f:
+					json.dump(summary, f, indent=4, sort_keys=True)
 
 				rospy.loginfo(f"[LAND] Saved ROI summary to: {out_path}")
 
@@ -888,7 +890,7 @@ class autopilot():
 						rospy.sleep(rospy.Duration(2))
 
 					rospy.loginfo_throttle_identical(5, "[WPSTAT] Attempting landing...")
-					self.sub_landing_marker = rospy.Subscriber(f"/marker_locations/id/{self.LANDING_ARUCO_ID}", PointStamped, self.callback_inspect_roi, callback_args=True)
+					self.sub_landing_marker = rospy.Subscriber(f"/marker_locations/id/{self.LANDING_ARUCO_ID}", PointStamped, self.callback_inspect_roi, queue_size=1, callback_args=True)
 
 			elif (self.spar_client.get_state() == GoalStatus.PREEMPTED) or (self.spar_client.get_state() == GoalStatus.ABORTED) or (self.spar_client.get_state() == GoalStatus.REJECTED):
 				self.pub_mission_status.publish("CANCELLED")
