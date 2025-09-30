@@ -348,7 +348,7 @@ class autopilot():
 
 		# record first-ever sighting per ID, ignore later updates
 		for x, y, tid in self.iter_triples(data):
-			if tid in self.seen:
+			if tid in self.seen or tid == self.LANDING_ARUCO_ID: # record landing ARUCO in visited_rois
 				continue
 			self.seen.add(tid)
 			if tid not in self.other_marker_locations:
