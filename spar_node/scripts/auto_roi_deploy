@@ -71,8 +71,8 @@ import yaml
 #----------------------------------------------------------------------------------------------------------------------------------------------------------------
 
 # --- Mission bounds
-X_MIN, X_MAX = -3.8,  3.8
-Y_MIN, Y_MAX = -2.5,  2.0
+X_MIN, X_MAX = -4.0,  4.0
+Y_MIN, Y_MAX = -3.2,  2.0
 Z_MIN, Z_MAX =  0.5,  4.0
 
 # This is getting a bit more complicated now, so we'll put our information in
@@ -255,13 +255,13 @@ class autopilot():
 		# Make sure waypoint is within mission zone
 		x, y, z, yaw = wp
 		if x > X_MAX or x < X_MIN:
-			rospy.logwarn("[CHKWP] Waypoint x=%.2f outside [-3.8, 3.8]" % x)
+			rospy.logwarn("[CHKWP] Waypoint x=%.2f outside [-4.0 4.0]" % x)
 			return False
 		if y > Y_MAX or y < Y_MIN:
-			rospy.logwarn("[CHKWP] Waypoint y=%.2f outside [-2.5, 2.0]" % y)
+			rospy.logwarn("[CHKWP] Waypoint y=%.2f outside [-3.2, 2.0]" % y)
 			return False
 		if z > Z_MAX or z < Z_MIN:
-			rospy.logwarn("[CHKWP] Waypoint z=%.2f outside [0, 0.5]" % z)
+			rospy.logwarn("[CHKWP] Waypoint z=%.2f outside [0.5, 4.0]" % z)
 			return False
 
 		# If we haven't returned false yet, then waypoint looks valid!
@@ -648,7 +648,7 @@ class autopilot():
 				with open(path, "w") as f:
 					json.dump(summary, f, indent=4, sort_keys=True)
 
-				rospy.loginfo(f"[LAND] Saved ROI summary to: {out_path}")
+				rospy.loginfo(f"[LAND] Saved ROI summary to: {path}")
 
 			except Exception as e:
 				rospy.logerr(f"[LAND] Failed to save ROI summary: {e}")
@@ -1024,8 +1024,8 @@ class autopilot():
 # ===================== Planner (X up, Y left) =====================
 
 def path_planner_xyleft(
-	Xmin=-3.75, Xmax=3.75,     # vertical extent (up/down)
-	Ymin=-2.45, Ymax= 1.95,    # horizontal extent (right/left)
+	Xmin=-3.95, Xmax=3.95,     # vertical extent (up/down)
+	Ymin=-3.15, Ymax= 1.95,    # horizontal extent (right/left)
 	startXY=(-1.0, -1.0),    # (X, Y) at ground
 	altitude=3.0,
 	fov_x_deg=54.0,          # across-track FOV (affects row spacing)
