@@ -129,7 +129,7 @@ class autopilot():
 		self.have_pose = False  # becomes True in callback_pose once we receive a pose
 
 		# Set our linear and rotational velocities for the flight
-		self.vel_linear = rospy.get_param("~vel_linear", 0.25)
+		self.vel_linear = rospy.get_param("~vel_linear", 0.3)
 		self.vel_yaw = rospy.get_param("~vel_yaw", 0.2)
 
 		# Set our position and yaw waypoint accuracies
@@ -444,7 +444,13 @@ class autopilot():
 			self.send_wp(dwp)
 			self.spar_client.wait_for_result()
 			if self.spar_client.get_state() != GoalStatus.SUCCEEDED:
-				rospy.signal_shutdown("cancelled")
+				rospy.logwarn_throttle_identical(2, "[ROI] Could not reach RWP from ROI; cancelling diversion.")
+				try:
+					self.spar_client.cancel_goal()
+				except Exception as e:
+					rospy.logwarn_throttle_identical(2, f"[ROI] Spar Client Cancel Goal error: {e}")
+
+				self.performing_roi = False
 				return
 
 		rospy.loginfo("[ROI] Reached diversion ROI!")
@@ -509,7 +515,13 @@ class autopilot():
 			self.send_wp(rwp)
 			self.spar_client.wait_for_result()
 			if self.spar_client.get_state() != GoalStatus.SUCCEEDED:
-				rospy.signal_shutdown("cancelled")
+				rospy.logwarn_throttle_identical(2, "[ROI] Could not reach RWP from ROI; cancelling diversion.")
+				try:
+					self.spar_client.cancel_goal()
+				except Exception as e:
+					rospy.logwarn_throttle_identical(2, f"[ROI] Spar Client Cancel Goal error: {e}")
+
+				self.performing_roi = False
 				return
 
 		# "waypoint_counter" represents the "next waypoint"
@@ -526,20 +538,25 @@ class autopilot():
 			pct = float(msg_in.percentage)
 			if pct > 0 and pct < 0.20 and not self.performing_emergency and not self.landed: # when battery drops below under 20%
 				rospy.logwarn_throttle_identical(5, f"[BATT] Critical Low Battery: {pct*100:.1f}%")
-				rospy.logwarn_throttle_identical(5, f"[BATT] Commencing emergency landing...")
 
-				# Stop any ROI diversion, cancel guidance, and land safely
-				try:
-					self.spar_client.cancel_goal()
-				except Exception:
-					pass
+				if not self.performing_roi:
+					rospy.logwarn_throttle_identical(5, f"[BATT] Commencing emergency landing...")
 
-				self.performing_roi = False
-				self.performing_emergency = True
+					# Stop any ROI diversion, cancel guidance, and land safely
+					try:
+						self.spar_client.cancel_goal()
+						rospy.sleep(rospy.Duration(0.5))
+					except Exception as e:
+						rospy.logwarn_throttle_identical(5, f"[BATT] Spar Client Cancel Goal error: {e}")
 
-				self.pub_mission_status.publish("LOW BATTERY")
-				# Attempt emergency landing (try ARUCO latch, else fallback to launch)
-				self.emergency_land()
+					self.performing_roi = False
+					self.performing_emergency = True
+
+					self.pub_mission_status.publish("LOW BATTERY")
+					# Attempt emergency landing (try ARUCO latch, else fallback to launch)
+					self.emergency_land()
+				else:
+					rospy.logwarn_throttle_identical(5, f"[BATT] Waiting for ROI diversion to finish...")
 
 		except Exception as e:
 			rospy.logwarn_throttle_identical(5, f"[BATT] Battery percentage read error: {e}")
@@ -591,8 +608,7 @@ class autopilot():
 			return
 
 		# Cancel any active goal and fly to approach altitude
-		self.spar_client.cancel_goal()
-		rospy.sleep(rospy.Duration(0.3))  # brief pause to let controller settle
+		rospy.sleep(rospy.Duration(0.5))  # brief pause to let controller settle
 		rospy.loginfo("[EMERG] Navigating to emergency landing approach point...")
 		
 		# Move toward the landing target with obstacle-aware path if possible
@@ -610,7 +626,7 @@ class autopilot():
 					self.land()
 				except Exception as e:
 					rospy.logerr(f"[EMERG] Direct LAND failed: {e}")
-				return
+					return
 
 		# Stabilize
 		if self.loiter_time > 0.0:
@@ -716,7 +732,7 @@ class autopilot():
 
 		# Parameters (private to this node). Change names if you prefer.
 		height = rospy.get_param("~height", 1.0)           # meters
-		speed  = rospy.get_param("~speed",  0.3)           # m/s ascent speed
+		speed  = rospy.get_param("~speed",  0.2)           # m/s ascent speed
 
 		goal.position.z = height
 		goal.velocity_vertical = speed
