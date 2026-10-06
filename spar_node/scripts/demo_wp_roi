@@ -11,6 +11,14 @@ from geometry_msgs.msg import Point, PoseStamped
 
 from spar_msgs.msg import FlightMotionAction, FlightMotionGoal
 
+from nav_msgs.msg import Path
+
+#Matt 1.9.26 Library for interfacing with breadcrumb
+from breadcrumb.srv import RequestPath
+from breadcrumb.srv import RequestPathRequest
+
+#Matt 7.9.26
+from std_msgs.msg import Bool, Empty, String
 
 # This is getting a bit more complicated now, so we'll put our information in
 # a class to keep track of all of our variables. This is not so much different
@@ -20,10 +28,45 @@ from spar_msgs.msg import FlightMotionAction, FlightMotionGoal
 # will call it's own functions as callbacks, etc.
 class Guidance():
 	def __init__(self, waypoints):
+
+		#Matt 17.9
+		self.use_breadcrumb = False
+
+
+		#Matt 7.9
+		self.payload_pub = rospy.Publisher(
+    	'/payload/drop_request',
+    	Bool,
+    	queue_size=10)
+
+		# Chris 05/10/2026
+		# Notify target localisation that the ROI sequence has completed.
+		self.roi_complete_pub = rospy.Publisher(
+			'/guidance/roi_complete',
+			Empty,
+			queue_size=10
+		)
+
+		# Chris 05/10/2026
+		# Request autonomous landing after the search mission is complete.
+		self.landing_request_pub = rospy.Publisher(
+			'/guidance/landing_request',
+			Empty,
+			queue_size=1
+		)
+
+
+		#Matt 1.9.26 Safe boundary values, default to (X<2,Y<2,Z<2)
+		self.safeRangeX = rospy.get_param("/guidance/safeRangeX", 2)
+		self.safeRangeY = rospy.get_param("/guidance/safeRangeY", 2)
+		self.safeRangeZ = rospy.get_param("/guidance/safeRangeZ", 2)
+
+
 		# Make sure we have a valid waypoint list
 		if not self.check_waypoints(waypoints):
-			raise ArgumentError("Invalid waypoint list input!")
-
+			#Matt 17.9
+			raise ValueError("Invalid waypoint list input!")
+		
 		# Internal counter to see what waypoint were are up to
 		self.waypoint_counter = 0
 
@@ -36,6 +79,9 @@ class Guidance():
 		# Save the input waypoints
 		self.waypoints = waypoints
 
+		#Sammi 37:54 Vid 4 3 Sep
+		#self.display_path(waypoints, "/guidance/fullPath")
+
 		# Make some space to record down our current location
 		self.current_location = Point()
 		# Set our linear and rotational velocities for the flight
@@ -44,6 +90,9 @@ class Guidance():
 		# Set our position and yaw waypoint accuracies
 		self.accuracy_pos = rospy.get_param("~acc_pos", 0.1)
 		self.accuracy_yaw = rospy.get_param("~acc_yaw", 0.1)
+		#Matt & Sammi 3.9.26
+		#Get Drone Altitude
+		self.DroneAltitude = rospy.get_param("~DroneAlt", 1)  
 
 		# Create our action client
 		action_ns = rospy.get_param("~action_topic", 'spar/flight')
@@ -51,15 +100,28 @@ class Guidance():
 		rospy.loginfo("Waiting for spar...")
 		self.spar_client.wait_for_server()
 
+		#Matt 1.9.26 
+		# Wait to connect with Breadcrumb (WARNING the code might be stuck in here if breadcrumb is not running)
+		# Code will error if you try to connect to a service
+		# that does not exist
+		rospy.wait_for_service('/breadcrumb/request_path')
+		self.srvc_bc = rospy.ServiceProxy('/breadcrumb/request_path', RequestPath)
+
 		if not rospy.is_shutdown():
 			# Good to go, start mission
 			rospy.loginfo("Starting waypoint mission")
 
+
 			# Setup first waypoint segment
 			# XXX:	Another option would be to do "takeoff" and leave "waypoint_counter = 0" to
 			#		begin the mission at the first waypoint after take-off
+			rospy.loginfo("Sending first waypoint...")
 			self.send_wp(self.waypoints[0])
 			self.waypoint_counter += 1
+			self.breadcrumbWPSnextIndex = 0
+			self.breadcrumbMode = False #Sammi 7 Sep - added to start breadcrumb mode
+			self.breadcrumbWPS = []
+
 
 			# Setup a timer to check if our waypoint has completed at 20Hz
 			self.timer = rospy.Timer( rospy.Duration(1.0/20.0), self.check_waypoint_status )
@@ -114,6 +176,13 @@ class Guidance():
 			rospy.logwarn("Waypoint has an invalid length (must be X/Y/Z/Yaw)")
 			return False
 
+		#Matt 1.9.26 Check if waypoint is inside the net for x, y and z
+		if abs (wp[0]) > self.safeRangeX or abs (wp[1]) > self.safeRangeY or abs (wp[2]) > self.safeRangeZ:
+			rospy.logwarn("Waypoint has an invalid size for 0134 (must be -{}<X<{}/{}<Y<{}/Z<{}/Yaw)".format(self.safeRangeX,self.safeRangeX,self.safeRangeY,self.safeRangeY,self.safeRangeZ))
+			return False
+
+
+
 		# If we haven't returned false yet, then waypoint looks valid!
 		return True
 
@@ -137,8 +206,15 @@ class Guidance():
 	# This function will fire whenever a ROI pose message is sent
 	# It is also responsible for handling the ROI "inspection task"
 	def callback_inspect_roi(self, msg_in):
+		# Ignore duplicate ROI commands while a diversion is already active.
+		if self.performing_roi:
+			rospy.logwarn("ROI ignored: diversion already in progress.")
+			return
+
 		# Set our flag that we are performing the diversion
 		self.performing_roi = True
+
+		rospy.loginfo("Starting diversion to ROI...")
 
 		rospy.loginfo("Starting diversion to ROI...")
 		# Cancel the current goal (if there is one)
@@ -148,8 +224,9 @@ class Guidance():
 		# XXX:	It would also be a good idea to capture "current yaw" from
 		#		the pose to maintain that throughout a diversion
 
+		#Matt 17.9 got rid of msg_in.pose.position.z replace with 0.5 to force drone to drop for fire payload
 		# Set the "diversion waypoint" (at yaw zero)
-		dwp = [msg_in.pose.position.x, msg_in.pose.position.y, msg_in.pose.position.z, 0.0]
+		dwp = [msg_in.pose.position.x, msg_in.pose.position.y, 0.5, 0.0]
 		# Set the "return waypoint" (at yaw zero)
 		rwp = [self.current_location.x, self.current_location.y, self.current_location.z, 0.0]
 
@@ -163,8 +240,36 @@ class Guidance():
 			return
 
 		rospy.loginfo("Reached diversion ROI!")
-		# XXX: Do something?
-		rospy.sleep(rospy.Duration(10))
+		
+		# Chris 05/10/2026 Hold position above target for 5 seconds
+		rospy.loginfo("Hovering above ROI for 5 seconds...")
+		rospy.sleep(5)
+
+		rospy.loginfo("Deploying payload")
+		self.payload_pub.publish(True)
+
+		try:
+			payload_complete = rospy.wait_for_message(
+				'/payload/drop_complete',
+				String,
+				timeout=5.0
+			)
+
+			rospy.loginfo(
+				"Payload deployment confirmed: %s",
+				payload_complete.data
+			)
+
+		except rospy.ROSException:
+			rospy.logerr(
+				"Payload deployment confirmation timeout."
+			)
+
+			rospy.signal_shutdown(
+				"payload deployment timeout"
+			)
+
+			return
 
 		rospy.loginfo("Returning to flight plan...")
 
@@ -177,18 +282,35 @@ class Guidance():
 
 		# "waypoint_counter" represents the "next waypoint"
 		# "waypoint_counter - 1" represents the "current waypoint"
-		rospy.loginfo("Resuming flight plan from waypoint %i!" % (self.waypoint_counter - 1))
-		self.send_wp(self.waypoints[self.waypoint_counter - 1])
+		rospy.loginfo(
+			"Resuming flight plan from waypoint %i!"
+			% (self.waypoint_counter - 1)
+		)
+
+		self.send_wp(
+			self.waypoints[self.waypoint_counter - 1]
+		)
+
 		# Unset our flag that we are performing a diversion
-		# to allow the waypoint timer to take back over
+		# to allow the waypoint timer to take back over.
 		self.performing_roi = False
+
+		# Chris 05/10/2026
+		# Tell the ROI controller that the complete target sequence
+		# has finished and that the next unique target may be accepted.
+		self.roi_complete_pub.publish(Empty())
+
+		rospy.loginfo(
+			"ROI sequence complete. Ready for next target."
+		)
 
 
 	# This function is for convinience to simply send out a new waypoint
 	def send_wp(self, wp):
 		# Make sure the waypoint is valid before continuing
 		if not self.check_waypoint(wp):
-			raise ArgumentError("Invalid waypoint input!")
+			#Matt 17.9
+			raise ValueError("Invalid waypoint input!")
 
 		# Build the flight goal
 		goal = FlightMotionGoal()
@@ -208,6 +330,7 @@ class Guidance():
 		# Instead we just send the waypoint and check up on it later
 		# This checking is either with the "self.timer" for waypoints
 		# or with direct calls during the ROI diversion
+
 		self.spar_client.send_goal(goal)
 		 # If shutdown is issued, cancel current mission before rospy is shutdown
 		rospy.on_shutdown(lambda : self.spar_client.cancel_goal())
@@ -215,52 +338,296 @@ class Guidance():
 
 	# This function will fire whenever we recieve a timer event (te) from rospy.Timer()
 	# The main purpose is to check if a waypoint has been reached,
-	# and if so, send out the next waypoint to continue the mission
+	# and if so, send out the next waypoint to continue the mission	
 	def check_waypoint_status(self, te):
 		# If we're performing the ROI diversion, then don't do
 		# anything here, as this is handled in that function
 		if not self.performing_roi:
 			# If the last segment has succeeded.
 			# For more complex tasks, it might be necessary to also
-			# check if you are in waypoint or diversion mode here.
+			# check if you are in waypoint or diversion mode here. (Matt note diversion which is the obsticale can also be called breadcrumb)
 			# Hint: really, we should check for other status states
 			#		(such as aborted), as there are some states
 			#		where we won't recover from, and should just exit
 			if self.spar_client.get_state() == GoalStatus.SUCCEEDED:
 				rospy.loginfo("Reached waypoint %i!" % (self.waypoint_counter))
 
+				#Matt 3.9.26
+				if self.waypoint_counter < (len(self.waypoints)):
+
+					# Set up a path request for breadcrumb
+					req = RequestPathRequest()
+					req.start.x = self.waypoints[self.waypoint_counter-1][0] #Getting X
+					req.start.y = self.waypoints[self.waypoint_counter-1][1] #Getting Y
+					req.start.z = self.waypoints[self.waypoint_counter-1][2] #Getting Z
+					req.end.x = self.waypoints[self.waypoint_counter][0]	 #Getting next X
+					req.end.y = self.waypoints[self.waypoint_counter][1]	 #Getting next Y
+					req.end.z = self.waypoints[self.waypoint_counter][2]	 #Getting next Z
+
+					rospy.loginfo("START [%0.2f,%0.2f,%0.2f]",
+					req.start.x,
+					req.start.y,
+					req.start.z)
+
+					rospy.loginfo("END [%0.2f,%0.2f,%0.2f]",
+					req.end.x,
+					req.end.y,
+					req.end.z)
+
+					#Matt 17.9 
+					next_wp = self.waypoints[self.waypoint_counter]
+
+					# Enable Breadcrumb when flying near the obstacle
+					# if abs(next_wp[0]) < 0.5:
+					# 	self.use_breadcrumb = True
+					# else:
+					# 	self.use_breadcrumb = False
+
+					# #Matt 6.10
+					# res = self.srvc_bc(req)
+
+					# rospy.loginfo(
+					# "Breadcrumb=%s  Next WP=%s",
+					# self.use_breadcrumb,
+					# str(self.waypoints[self.waypoint_counter])
+					# )
+
+				
+
+					# #Matt 17.9 goes to waypoint then code underneith calls for breadcrumb to take over when obstical is in path
+					# if self.use_breadcrumb:
+
+					# 	rospy.loginfo("Breadcrumb mode active")
+
+
+					# 	#Matt 6.10
+					# 	if len(res.path.poses) > 2:
+					# 		self.use_breadcrumb = True
+					# 	else:
+					# 		self.use_breadcrumb = False
+
+
+					# 	breadcrumbWPS = []
+
+					# 	if len(res.path.poses) > 0:
+
+					# 		for i in range(len(res.path.poses)):
+
+					# 			breadcrumbWPS.append([
+					# 				res.path.poses[i].position.x,
+					# 				res.path.poses[i].position.y,
+					# 				self.DroneAltitude,
+					# 				0.0
+					# 			])
+
+					# 		self.display_path(breadcrumbWPS)
+
+					# 		for wp in breadcrumbWPS[1:]:
+					# 			rospy.loginfo(
+					# 				"Following breadcrumb waypoint: {}".format(wp)
+					# 			)
+
+					# 			self.send_wp(wp)
+					# 			self.spar_client.wait_for_result()
+
+					# 	else:
+					# 		rospy.logerr("Breadcrumb could not find path")
+
+					# else:
+
+					# 	rospy.loginfo(
+					# 		"Flying direct waypoint: {}".format(
+					# 			self.waypoints[self.waypoint_counter]
+					# 		)
+					# 	)
+
+					# 	self.send_wp(
+					# 		self.waypoints[self.waypoint_counter]
+					# 	)
+
+					# 	self.spar_client.wait_for_result()
+
+					#Matt 6.10
+					# Ask Breadcrumb to calculate the route first
+					res = self.srvc_bc(req)
+
+					pose_count = len(res.path.poses)
+
+					rospy.loginfo(
+						"Breadcrumb returned %d poses",
+						pose_count
+					)
+
+					# Do not fly directly if Breadcrumb failed to return a path
+					if pose_count == 0:
+						rospy.logerr(
+							"Breadcrumb returned no path. Mission cancelled for safety."
+						)
+						self.spar_client.cancel_goal()
+						rospy.signal_shutdown("breadcrumb path unavailable")
+						return
+
+					# Two poses normally represent a direct start-to-end route.
+					# More than two poses indicate that an avoidance route was generated.
+					self.use_breadcrumb = pose_count > 2
+
+					rospy.loginfo(
+						"Breadcrumb=%s  Next WP=%s",
+						self.use_breadcrumb,
+						str(self.waypoints[self.waypoint_counter])
+					)
+
+					if self.use_breadcrumb:
+						rospy.loginfo(
+							"Obstacle avoidance required. Breadcrumb mode active."
+						)
+
+						breadcrumbWPS = []
+
+						for pose in res.path.poses:
+							breadcrumbWPS.append([
+								pose.position.x,
+								pose.position.y,
+								self.DroneAltitude,
+								0.0
+							])
+
+						self.display_path(breadcrumbWPS)
+
+						for wp in breadcrumbWPS[1:]:
+							rospy.loginfo(
+								"Following breadcrumb waypoint: %s",
+								str(wp)
+							)
+
+							self.send_wp(wp)
+							self.spar_client.wait_for_result()
+
+							if self.spar_client.get_state() != GoalStatus.SUCCEEDED:
+								rospy.logerr(
+									"Failed to reach Breadcrumb waypoint: %s",
+									str(wp)
+								)
+								rospy.signal_shutdown("breadcrumb waypoint failed")
+								return
+
+					else:
+						rospy.loginfo(
+							"No obstacle avoidance required. Flying direct waypoint: %s",
+							str(self.waypoints[self.waypoint_counter])
+						)
+
+						self.send_wp(
+							self.waypoints[self.waypoint_counter]
+						)
+						self.spar_client.wait_for_result()
+
+						if self.spar_client.get_state() != GoalStatus.SUCCEEDED:
+							rospy.logerr(
+								"Failed to reach direct mission waypoint."
+							)
+							rospy.signal_shutdown("direct waypoint failed")
+							return
+
+				#Matt 3.9.26 I didn't know this code already existed already made above
 				# XXX:	Another check could go here to finish the mission early
 				#		if "all" inspection tasks have been completed
 				#		(Add in another "if" and make the waypoint counter check
 				#		 an "elif" check instead.
 				#		 i.e. if complete; elif more wps; else wps finished)
-				if self.waypoint_counter < (len(self.waypoints)):
-					self.send_wp(self.waypoints[self.waypoint_counter])
+				#if self.waypoint_counter < (len(self.waypoints)):
+					# self.send_wp(breadcrumbWPS[1])
+					# self.send_wp(self.waypoints[self.waypoint_counter])
 					# Increment our waypoint counter
 					self.waypoint_counter += 1
 				else:
-					# Else the mission is over, shutdown and quit the node
-					# XXX:	This could be used to restart the mission back to the
-					#		first waypoint instead to restart the mission
-					rospy.loginfo("Mission complete!")
-					rospy.signal_shutdown("complete")
+					# Chris 05/10/2026
+					# Search mission has finished. Request the landing controller
+					# to move above the designated ArUco marker and land.
+
+					rospy.loginfo(
+						"Search mission complete. Requesting autonomous landing."
+					)
+
+					self.landing_request_pub.publish(
+						Empty()
+					)
+
+					# Allow the landing request to be delivered before
+					# shutting down the Guidance node.
+					rospy.sleep(0.5)
+
+					rospy.loginfo(
+						"Landing request sent. Guidance mission complete."
+					)
+
+					rospy.signal_shutdown(
+						"search complete - landing requested"
+					)
 			elif (self.spar_client.get_state() == GoalStatus.PREEMPTED) or (self.spar_client.get_state() == GoalStatus.ABORTED) or (self.spar_client.get_state() == GoalStatus.REJECTED):
 				rospy.loginfo("Mission cancelled!")
 				rospy.signal_shutdown("cancelled")
 
+	#Matt 1.9.26 wrote code video 3 end - displaying a path
+	def display_path(self, wps):
+		rospy.loginfo("Displaying path...")
+		pub_path = rospy.Publisher("/guidance/path", Path, queue_size=10, latch=True)
+		msg = Path()
+		msg.header.frame_id = "/map"
+		msg.header.stamp = rospy.Time.now()
+
+		for wp in wps:
+			pose = PoseStamped() 
+			pose.pose.position.x = wp[0]
+			pose.pose.position.y = wp[1]
+			pose.pose.position.z = wp[2]
+
+			pose.pose.orientation.w = 1.0
+			pose.pose.orientation.x = 0.0
+			pose.pose.orientation.y = 0.0
+			pose.pose.orientation.z = 0.0
+
+			msg.poses.append(pose)
+
+		rospy.loginfo("Publishing path...")
+		pub_path.publish(msg)
 
 def main(args):
 	# Initialise ROS
 	rospy.init_node('guidance')
+	# print(rospy.get_param_names())
 
+	DroneAltitude = rospy.get_param("/guidance/DroneAlt", 1)
+	#This is to show on the terminal it's flying at.
+	print("DroneAltitude =", DroneAltitude)
 	# List of waypoints
+	# DroneAltitude = 2.0 #Matt added DroneAltitude so it's easier to change altitude on the day.
+	
+	
+	#Y is East west of netted area and north south is x coordinates
 	# [X, Y, Z, Yaw]
-	wps = [[ 0.0, 0.0, 1.0, 0.0],
-		   [ 1.0, 1.0, 1.0, 0.0],
-		   [-1.0, 1.0, 1.0, 0.0],
-		   [-1.0,-1.0, 1.0, 0.0],
-		   [ 1.0,-1.0, 1.0, 0.0],
-		   [ 0.0, 0.0, 1.0, 0.0]]
+	wps = [[ 0.0, 0.0, DroneAltitude, 0.0],
+		   #[ 3.0, 1.5, DroneAltitude, 0.0],
+		   [ 4.0, -3.0, DroneAltitude, 0.0],
+		   [ 4.0, 2.0, DroneAltitude, 0.0],
+		   [ 3.0, 2.0, DroneAltitude, 0.0],
+		   [ 3.0, -3.0, DroneAltitude, 0.0],
+		   [ 2.0, -3.0, DroneAltitude, 0.0],
+		   [ 2.0, 2.0, DroneAltitude, 0.0],
+		   [ 1.0, 2.0, DroneAltitude, 0.0],
+		   [ 1.0, -3.0, DroneAltitude, 0.0],
+		   [ 0.0, -3.0, DroneAltitude, 0.0],
+		   [ -0.0, 2.0, DroneAltitude, 0.0],
+		   [ -1.0, 2.0, DroneAltitude, 0.0],
+		   [ -1.0, -3.0, DroneAltitude, 0.0],
+		   [ -2.0, -3.0, DroneAltitude, 0.0],
+		   [ -2.0, 2.0, DroneAltitude, 0.0],
+		   [ -3.0, 2.0, DroneAltitude, 0.0],
+		   [ -3.0, -3.0, DroneAltitude, 0.0],
+		   [ -4.0, -3.0, DroneAltitude, 0.0],
+		   [ -4.0, 2.0, DroneAltitude, 0.0]]
+		
+	# Control D to select same wording and use arrows to move- Matt
 
 	# Create our guidance class option
 	guide = Guidance(wps)
@@ -276,3 +643,4 @@ if __name__ == '__main__':
 		pass
 
 	print('')
+	
